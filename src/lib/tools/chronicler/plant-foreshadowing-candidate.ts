@@ -40,7 +40,8 @@ export const plantForeshadowingCandidateTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    if (!ctx.firestore) throw new Error("plant_foreshadowing_candidate: ctx.firestore not provided");
+    if (!ctx.firestore)
+      throw new Error("plant_foreshadowing_candidate: ctx.firestore not provided");
     const ref = await ctx.firestore
       .collection(COL.campaigns)
       .doc(ctx.campaignId)

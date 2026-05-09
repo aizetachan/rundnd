@@ -709,11 +709,7 @@ describe("Chronicler tools", () => {
           foreshadowingSeeds: [{ id: UUID, data: { status: "PLANTED" } }],
         },
       });
-      const out = await mod.invokeTool(
-        "ratify_foreshadowing_seed",
-        { seed_id: UUID },
-        makeCtx(fs),
-      );
+      const out = await mod.invokeTool("ratify_foreshadowing_seed", { seed_id: UUID }, makeCtx(fs));
       expect(out).toEqual({ seed_id: UUID, status: "GROWING" });
       expect(captured.sets).toHaveLength(1);
       const set = captured.sets[0];

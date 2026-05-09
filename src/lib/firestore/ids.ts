@@ -22,5 +22,12 @@ const SAFE_ID_CHARS = /[^a-z0-9_-]+/g;
  * a hash suffix.
  */
 export function safeNameId(name: string): string {
-  return name.trim().toLowerCase().replace(SAFE_ID_CHARS, "-").replace(/^-+|-+$/g, "").slice(0, 200) || "unnamed";
+  return (
+    name
+      .trim()
+      .toLowerCase()
+      .replace(SAFE_ID_CHARS, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 200) || "unnamed"
+  );
 }

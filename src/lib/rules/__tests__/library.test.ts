@@ -77,7 +77,7 @@ function fakeFirestore(opts: FakeFirestoreOpts): Firestore {
     collection: (name: string) => {
       if (name === "ruleLibraryChunks") {
         return {
-          where: (k: string, op: string, v: unknown) => rulesQueryFor({ [k]: v }),
+          where: (k: string, _op: string, v: unknown) => rulesQueryFor({ [k]: v }),
         };
       }
       if (name === "campaigns") return campaignsCol;

@@ -175,10 +175,7 @@ function makeFakeFirestore(memories: MemoryDoc[], captured: CapturedFs): Firesto
 
   function makeBatch() {
     return {
-      update: (
-        ref: { id: string; path: string },
-        patch: Record<string, unknown>,
-      ) => {
+      update: (ref: { id: string; path: string }, patch: Record<string, unknown>) => {
         captured.batchUpdates.push({ docId: ref.id, patch });
       },
       commit: async () => {

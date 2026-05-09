@@ -87,10 +87,7 @@ export interface ChronicleTurnDeps extends ChroniclerDeps {
  * race deterministically — exactly one observes `inFlight === false`
  * (or stale timestamp) and proceeds; the other backs off.
  */
-async function acquireChroniclerLock(
-  firestore: Firestore,
-  campaignId: string,
-): Promise<boolean> {
+async function acquireChroniclerLock(firestore: Firestore, campaignId: string): Promise<boolean> {
   const ref = firestore.collection(COL.campaigns).doc(campaignId);
   return await firestore.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -122,10 +119,7 @@ async function acquireChroniclerLock(
   });
 }
 
-async function releaseChroniclerLock(
-  firestore: Firestore,
-  campaignId: string,
-): Promise<void> {
+async function releaseChroniclerLock(firestore: Firestore, campaignId: string): Promise<void> {
   const ref = firestore.collection(COL.campaigns).doc(campaignId);
   await ref.set({ chroniclerInFlight: false }, { merge: true });
 }
@@ -140,9 +134,7 @@ async function releaseChroniclerLock(
 export async function chronicleTurn(
   input: ChronicleTurnInput,
   deps: ChronicleTurnDeps,
-): Promise<
-  "ok" | "already_chronicled" | "failed" | "skipped_non_continue" | "skipped_concurrent"
-> {
+): Promise<"ok" | "already_chronicled" | "failed" | "skipped_non_continue" | "skipped_concurrent"> {
   const logger = deps.logger ?? ((level, msg, meta) => console.log(`[${level}] ${msg}`, meta));
   // Correlation fields attached to every chronicler log so a failure
   // joins up with the originating turn's stdout lines.
@@ -294,10 +286,7 @@ export async function chronicleTurn(
       }
     } else {
       // No cost — just stamp chronicledAt.
-      await turnRef.set(
-        { chronicledAt: FieldValue.serverTimestamp() },
-        { merge: true },
-      );
+      await turnRef.set({ chronicledAt: FieldValue.serverTimestamp() }, { merge: true });
     }
 
     logger("info", "chronicleTurn: ok", {

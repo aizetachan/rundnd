@@ -48,11 +48,7 @@ export function SignUpForm() {
     setError(null);
     setBusy(true);
     try {
-      const cred = await createUserWithEmailAndPassword(
-        getFirebaseClientAuth(),
-        email,
-        password,
-      );
+      const cred = await createUserWithEmailAndPassword(getFirebaseClientAuth(), email, password);
       const idToken = await cred.user.getIdToken();
       await postIdTokenAndRedirect(idToken);
     } catch (err) {

@@ -121,8 +121,7 @@ async function loadMetaState(
     .limit(1)
     .get();
   const latestRow = latestSnap.docs[0]?.data();
-  const lastGameplayTurn =
-    typeof latestRow?.turnNumber === "number" ? latestRow.turnNumber : 0;
+  const lastGameplayTurn = typeof latestRow?.turnNumber === "number" ? latestRow.turnNumber : 0;
 
   return { settings: rawSettings, meta, lastGameplayTurn };
 }

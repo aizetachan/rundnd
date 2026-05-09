@@ -56,9 +56,7 @@ function fakeFirestore(hooks: FsHooks): Firestore {
     get: async () => ({
       exists: hooks.turnExists !== false,
       data: () =>
-        hooks.turnExists === false
-          ? undefined
-          : { chronicledAt: hooks.turnChronicledAt ?? null },
+        hooks.turnExists === false ? undefined : { chronicledAt: hooks.turnChronicledAt ?? null },
     }),
     set: async (patch: Record<string, unknown>, _opts?: { merge?: boolean }) => {
       hooks.turnSetCalls.push({ patch });
@@ -116,11 +114,7 @@ function fakeFirestore(hooks: FsHooks): Firestore {
           if (ref === campaignDocRef) return campaignDocRef.get();
           throw new Error("unexpected tx.get target");
         },
-        set: (
-          ref: unknown,
-          data: Record<string, unknown>,
-          _opts?: { merge?: boolean },
-        ) => {
+        set: (ref: unknown, data: Record<string, unknown>, _opts?: { merge?: boolean }) => {
           if (ref === campaignDocRef) {
             hooks.campaignSetCalls.push({ patch: data });
             return;
@@ -176,9 +170,7 @@ describe("chronicleTurn — wrapper semantics (M0.5 Firestore migration)", () =>
 
     // chronicledAt was stamped. The patch always carries it as a sentinel
     // (FieldValue.serverTimestamp) — we only assert the key is present.
-    const chronicledAtSet = hooks.turnSetCalls.find((s) =>
-      Object.hasOwn(s.patch, "chronicledAt"),
-    );
+    const chronicledAtSet = hooks.turnSetCalls.find((s) => Object.hasOwn(s.patch, "chronicledAt"));
     expect(chronicledAtSet).toBeDefined();
   });
 
@@ -201,9 +193,9 @@ describe("chronicleTurn — wrapper semantics (M0.5 Firestore migration)", () =>
     expect(result).toBe("already_chronicled");
     expect(queryCalled).toBe(false);
     // No chronicledAt stamp re-applied.
-    expect(
-      hooks.turnSetCalls.filter((s) => Object.hasOwn(s.patch, "chronicledAt")),
-    ).toHaveLength(0);
+    expect(hooks.turnSetCalls.filter((s) => Object.hasOwn(s.patch, "chronicledAt"))).toHaveLength(
+      0,
+    );
   });
 
   it("returns 'failed' when the turn doc is missing", async () => {
@@ -217,9 +209,7 @@ describe("chronicleTurn — wrapper semantics (M0.5 Firestore migration)", () =>
     expect(result).toBe("failed");
     expect(hooks.turnSetCalls).toHaveLength(0);
     // Lock release still happened.
-    const releasePatch = hooks.campaignSetCalls.find(
-      (c) => c.patch.chroniclerInFlight === false,
-    );
+    const releasePatch = hooks.campaignSetCalls.find((c) => c.patch.chroniclerInFlight === false);
     expect(releasePatch).toBeDefined();
   });
 
@@ -251,13 +241,11 @@ describe("chronicleTurn — wrapper semantics (M0.5 Firestore migration)", () =>
     const result = await chronicleTurn(baseInput(), { firestore, queryFn: throwingQuery });
     expect(result).toBe("failed"); // NOT thrown
     // chronicledAt NOT stamped on failure.
-    expect(
-      hooks.turnSetCalls.filter((s) => Object.hasOwn(s.patch, "chronicledAt")),
-    ).toHaveLength(0);
-    // Lock released on error path too.
-    const releasePatch = hooks.campaignSetCalls.find(
-      (c) => c.patch.chroniclerInFlight === false,
+    expect(hooks.turnSetCalls.filter((s) => Object.hasOwn(s.patch, "chronicledAt"))).toHaveLength(
+      0,
     );
+    // Lock released on error path too.
+    const releasePatch = hooks.campaignSetCalls.find((c) => c.patch.chroniclerInFlight === false);
     expect(releasePatch).toBeDefined();
   });
 

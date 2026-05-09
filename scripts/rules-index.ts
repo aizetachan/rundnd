@@ -51,11 +51,7 @@ interface IndexResult {
 /** Composite doc id from the rule-library lookup tuple. Null axis or
  * valueKey collapse to the literal string "null" so downstream `where`
  * queries with `axis == null` match what was written. */
-function chunkDocId(
-  category: string,
-  axis: string | null,
-  valueKey: string | null,
-): string {
+function chunkDocId(category: string, axis: string | null, valueKey: string | null): string {
   const parts = [category, axis ?? "null", valueKey ?? "null"];
   return safeNameId(parts.join("__"));
 }

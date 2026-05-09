@@ -1,5 +1,5 @@
 import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
-import { type Firestore, FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type Firestore } from "firebase-admin/firestore";
 
 /**
  * Semantic-memory heat physics (§9.1 decay curves — v3-parity Phase 4).

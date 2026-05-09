@@ -200,11 +200,7 @@ function fakeFirestore(trace: FsTrace): Firestore {
           if (ref === campaignDocRef) return campaignDocRef.get();
           throw new Error("unexpected tx.get");
         },
-        set: (
-          ref: unknown,
-          data: Record<string, unknown>,
-          _opts?: { merge?: boolean },
-        ) => {
+        set: (ref: unknown, data: Record<string, unknown>, _opts?: { merge?: boolean }) => {
           if (ref === campaignDocRef) {
             trace.campaignSets.push(data);
             return;

@@ -171,15 +171,10 @@ export async function POST(req: Request) {
         // appropriate, runTurn otherwise. The Firestore lookup is
         // cheap and bounded; avoids a full runTurn round-trip for
         // meta exchanges.
-        const campaignSnap = await firestore
-          .collection(COL.campaigns)
-          .doc(body.campaignId)
-          .get();
+        const campaignSnap = await firestore.collection(COL.campaigns).doc(body.campaignId).get();
         const campaignData = campaignSnap.exists ? campaignSnap.data() : undefined;
         const settingsRaw =
-          campaignData &&
-          campaignData.ownerUid === user.id &&
-          campaignData.deletedAt === null
+          campaignData && campaignData.ownerUid === user.id && campaignData.deletedAt === null
             ? campaignData.settings
             : undefined;
         const parsed = CampaignSettings.safeParse(settingsRaw ?? {});

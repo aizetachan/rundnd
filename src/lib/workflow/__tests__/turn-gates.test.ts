@@ -159,10 +159,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
         limit: () => ({
           get: async () => ({
             empty: defenderTier === null,
-            docs:
-              defenderTier === null
-                ? []
-                : [{ data: () => ({ powerTier: defenderTier }) }],
+            docs: defenderTier === null ? [] : [{ data: () => ({ powerTier: defenderTier }) }],
           }),
         }),
       }),

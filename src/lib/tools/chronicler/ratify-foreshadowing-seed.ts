@@ -54,11 +54,7 @@ export const ratifyForeshadowingSeedTool = registerTool({
           `ratify_foreshadowing_seed: no PLANTED seed found for id ${input.seed_id} (may already be ratified, resolved, or belong to another campaign)`,
         );
       }
-      tx.set(
-        ref,
-        { status: "GROWING", updatedAt: FieldValue.serverTimestamp() },
-        { merge: true },
-      );
+      tx.set(ref, { status: "GROWING", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
       return { seed_id: input.seed_id, status: "GROWING" as const };
     });
   },

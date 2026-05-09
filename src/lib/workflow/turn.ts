@@ -384,10 +384,7 @@ export type TurnWorkflowEvent =
  * simultaneous turns deterministic — exactly one observes inFlight=false
  * (or stale timestamp) and proceeds.
  */
-async function tryClaimTurnLock(
-  firestore: Firestore,
-  campaignId: string,
-): Promise<boolean> {
+async function tryClaimTurnLock(firestore: Firestore, campaignId: string): Promise<boolean> {
   const ref = firestore.collection(COL.campaigns).doc(campaignId);
   return await firestore.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -533,8 +530,7 @@ async function loadTurnContext(
       turn_number: typeof r.turnNumber === "number" ? r.turnNumber : 0,
       player_message: typeof r.playerMessage === "string" ? r.playerMessage : "",
       narrative_text: typeof r.narrativeText === "string" ? r.narrativeText : "",
-      style_drift_used:
-        typeof r.styleDriftUsed === "string" ? (r.styleDriftUsed as string) : null,
+      style_drift_used: typeof r.styleDriftUsed === "string" ? (r.styleDriftUsed as string) : null,
     };
   });
 
