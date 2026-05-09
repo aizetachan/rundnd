@@ -1,0 +1,134 @@
+# Firebase App Hosting backend config.
+#
+# Reference: https://firebase.google.com/docs/app-hosting/configure
+# - `runConfig` controls the Cloud Run service (memory, concurrency).
+# - `env` exposes plain env vars + references to Secret Manager.
+# - Secrets must be created via `firebase apphosting:secrets:set <NAME>`
+#   and granted to the backend before they resolve at deploy time.
+
+runConfig:
+  cpu: 1
+  memoryMiB: 1024
+  maxInstances: 5
+  minInstances: 0
+  concurrency: 80
+  timeoutSeconds: 300
+
+env:
+  # --- Public client config (NEXT_PUBLIC_*) — inlined into the browser bundle at build time ---
+  - variable: NEXT_PUBLIC_APP_URL
+    value: "https://rundnd-fd1dc.web.app"
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    value: "AIzaSyDEbAOwj-bUMZqFaLg5RlEBgDpMfZCqwTk"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    value: "rundnd-fd1dc.firebaseapp.com"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    value: "rundnd-fd1dc"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+    value: "rundnd-fd1dc.firebasestorage.app"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+    value: "716578410151"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_APP_ID
+    value: "1:716578410151:web:5ffabf95ed3ef2ea4e1582"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
+    value: "G-MEGZJEZT7M"
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # --- Server-side Firebase Admin ---
+  # No service account key needed: App Hosting runs with Application
+  # Default Credentials backed by the attached service identity.
+  - variable: FIREBASE_PROJECT_ID
+    value: "rundnd-fd1dc"
+    availability:
+      - RUNTIME
+  - variable: FIREBASE_STORAGE_BUCKET
+    value: "rundnd-fd1dc.firebasestorage.app"
+    availability:
+      - RUNTIME
+
+  # --- LLM provider keys (Secret Manager) ---
+  - variable: ANTHROPIC_API_KEY
+    secret: ANTHROPIC_API_KEY
+    availability:
+      - RUNTIME
+  - variable: GOOGLE_API_KEY
+    secret: GOOGLE_API_KEY
+    availability:
+      - RUNTIME
+  - variable: OPENAI_API_KEY
+    secret: OPENAI_API_KEY
+    availability:
+      - RUNTIME
+  - variable: OPENROUTER_API_KEY
+    secret: OPENROUTER_API_KEY
+    availability:
+      - RUNTIME
+
+  # --- Observability (Secret Manager) ---
+  - variable: LANGFUSE_PUBLIC_KEY
+    secret: LANGFUSE_PUBLIC_KEY
+    availability:
+      - RUNTIME
+  - variable: LANGFUSE_SECRET_KEY
+    secret: LANGFUSE_SECRET_KEY
+    availability:
+      - RUNTIME
+  - variable: LANGFUSE_HOST
+    value: "https://us.cloud.langfuse.com"
+    availability:
+      - RUNTIME
+
+  - variable: NEXT_PUBLIC_POSTHOG_KEY
+    secret: NEXT_PUBLIC_POSTHOG_KEY
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_POSTHOG_HOST
+    value: "https://us.i.posthog.com"
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # --- Algolia (Fase 4 — fill once the index exists) ---
+  - variable: ALGOLIA_APP_ID
+    secret: ALGOLIA_APP_ID
+    availability:
+      - RUNTIME
+  - variable: ALGOLIA_ADMIN_KEY
+    secret: ALGOLIA_ADMIN_KEY
+    availability:
+      - RUNTIME
+  - variable: NEXT_PUBLIC_ALGOLIA_APP_ID
+    secret: NEXT_PUBLIC_ALGOLIA_APP_ID
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+    secret: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+    availability:
+      - BUILD
+      - RUNTIME

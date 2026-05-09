@@ -1,0 +1,54 @@
+rules_version = '2';
+
+// Firebase Admin SDK (server-side, used by all Next.js Server Components,
+// route handlers, and server actions) BYPASSES these rules entirely. So
+// the rules here are the second-line defense against any client-side
+// Firestore SDK call that might land later (admin tooling, future client
+// reads). Default posture: deny. Open holes only when a client-side
+// reader needs them.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny for everything not explicitly allowed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Per-user data — only the authenticated user can read their own
+    // root doc. Writes always go through Admin SDK.
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      match /{sub=**} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // Campaigns — readable by their owner via the client SDK if/when a
+    // client-side reader is added. Writes always go through Admin SDK
+    // (so the lock + transaction semantics in workflow/turn.ts remain
+    // server-authoritative).
+    match /campaigns/{campaignId} {
+      allow read: if request.auth != null
+                  && resource.data.ownerUid == request.auth.uid
+                  && resource.data.deletedAt == null;
+
+      match /{sub=**} {
+        allow read: if request.auth != null
+                    && get(/databases/$(database)/documents/campaigns/$(campaignId)).data.ownerUid == request.auth.uid;
+      }
+    }
+
+    // Profiles — public read (Cowboy Bebop, Solo Leveling templates are
+    // shared across users). Writes are admin-only.
+    match /profiles/{profileId} {
+      allow read: if true;
+    }
+
+    // Rule library — public read (shared narration guidance corpus).
+    match /ruleLibraryChunks/{chunkId} {
+      allow read: if true;
+    }
+  }
+}

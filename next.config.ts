@@ -2,10 +2,9 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // Produces .next/standalone/ for the Dockerfile's runner stage. Required for Railway deploy.
-  output: "standalone",
-  // typedRoutes can land in a later milestone once the route tree stabilizes.
-  // At M0 it adds friction (routes under () groups, catch-alls, etc.) without payoff.
+  // Firebase App Hosting builds Next.js natively (Cloud Run under the
+  // hood); no need for `output: "standalone"` here. Leaving it out also
+  // keeps `next dev` faster locally.
   typedRoutes: false,
 };
 

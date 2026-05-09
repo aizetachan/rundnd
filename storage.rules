@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Storage isn't actively used yet — when image uploads (portrait
+// pipeline, profile assets) land they'll define their own paths. Until
+// then, deny all client-side access. Admin SDK uploads still work.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
