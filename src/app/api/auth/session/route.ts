@@ -1,4 +1,5 @@
 import { getFirebaseAuth } from "@/lib/firebase/admin";
+import { ensureUserSeeded } from "@/lib/seed/ensure-seeded";
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -64,6 +65,18 @@ export async function POST(req: NextRequest) {
     const ageSec = Math.floor(Date.now() / 1000) - decoded.auth_time;
     if (ageSec > 5 * 60) {
       return NextResponse.json({ error: "stale_token" }, { status: 401 });
+    }
+    // Lazy upsert + Bebop demo seed. Replaces the old Clerk webhook
+    // flow that ran on user.created. Errors are logged but don't block
+    // sign-in — a failed seed is recoverable later via the CLI script,
+    // whereas a blocked sign-in leaves the user stranded.
+    try {
+      await ensureUserSeeded({ id: decoded.uid, email: decoded.email ?? null });
+    } catch (err) {
+      console.error("[auth/session] ensureUserSeeded failed", {
+        uid: decoded.uid,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     cookie = await auth.createSessionCookie(body.idToken, {
       expiresIn: SESSION_DURATION_MS,

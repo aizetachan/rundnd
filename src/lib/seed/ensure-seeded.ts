@@ -1,28 +1,41 @@
 import type { AppUser } from "@/lib/auth";
-import { getDb } from "@/lib/db";
-import { users } from "@/lib/state/schema";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { seedBebopCampaign } from "./bebop";
 
 /**
- * Belt-and-suspenders backfill: upsert the Drizzle `users` row + make
- * sure the player has the Bebop demo campaign. Runs on `/campaigns`
- * load so anyone who slips past the Clerk `user.created` webhook —
- * accounts that predate the webhook, webhook delivery failures, local
- * dev without a tunnel — still gets a playable campaign on first
- * visit. The Clerk webhook is still the primary path; this is the
- * safety net.
+ * Lazy upsert of the user doc + Bebop demo campaign. Invoked from
+ * POST /api/auth/session right after the ID token verifies, so the
+ * player who just signed up lands on /campaigns with something to
+ * play immediately.
  *
  * Both operations are idempotent:
- *   - users: onConflictDoNothing on (id)
+ *   - users/{uid}: set merge (creates the doc on first call, no-ops on
+ *     repeat calls; never overwrites the spending cap if already set).
  *   - seedBebopCampaign: upserts profile by slug, skips campaign
- *     creation if one with BEBOP_CAMPAIGN_NAME already exists
+ *     creation if one with BEBOP_CAMPAIGN_NAME already exists.
  *
- * Cost: ~2-3 selects on a warm path (existing user + campaign). The
- * campaigns page is not hot enough for this to matter.
+ * Cost: ~3 Firestore reads on the warm path (user doc + profile lookup
+ * + campaign existence check). Sign-in latency, not turn-time hot path.
  */
 export async function ensureUserSeeded(user: AppUser): Promise<void> {
   if (!user.email) return;
-  const db = getDb();
-  await db.insert(users).values({ id: user.id, email: user.email }).onConflictDoNothing();
-  await seedBebopCampaign(db, user.id);
+  const db = getFirebaseFirestore();
+  const userRef = db.collection(COL.users).doc(user.id);
+  const snap = await userRef.get();
+  if (!snap.exists) {
+    await userRef.set({
+      id: user.id,
+      email: user.email,
+      createdAt: FieldValue.serverTimestamp(),
+      deletedAt: null,
+      dailyCostCapUsd: null,
+    });
+  } else {
+    // Keep email fresh if the user changed it on the auth provider side,
+    // but never clobber locally-set fields (set merge respects them).
+    await userRef.set({ email: user.email }, { merge: true });
+  }
+  await seedBebopCampaign(user.id);
 }

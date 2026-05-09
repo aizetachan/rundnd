@@ -1,20 +1,20 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Db } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { anthropicFallbackConfig } from "@/lib/providers";
-import { campaigns, characters, profiles } from "@/lib/state/schema";
 import { Profile } from "@/lib/types/profile";
-import { and, eq, isNull } from "drizzle-orm";
+import { FieldValue } from "firebase-admin/firestore";
 import jsYaml from "js-yaml";
 
 /**
  * Reusable seed — Cowboy Bebop profile + Spike character + a playable
- * campaign. Shared by `pnpm seed:campaign` (dev CLI) and the Clerk
- * webhook (auto-seed on first sign-in, so the player can hit prod and
- * play without running any manual commands).
+ * campaign. Invoked by `pnpm seed:campaign` (dev CLI) and by the
+ * sign-in flow (POST /api/auth/session) so a player who's just signed
+ * up lands on /campaigns with something to play immediately.
  *
  * Idempotent: upserts the profile by slug and creates the campaign
- * only if the user doesn't already have one named CAMPAIGN_NAME.
+ * only if the user doesn't already have one named BEBOP_CAMPAIGN_NAME.
  */
 
 const BEBOP_FIXTURE_PATH = join(process.cwd(), "evals", "golden", "profiles", "cowboy_bebop.yaml");
@@ -65,7 +65,7 @@ interface SeedResult {
   profileId: string;
   campaignId: string;
   characterId: string;
-  created: boolean; // true if a new campaign was created, false if re-using existing
+  created: boolean;
 }
 
 /**
@@ -73,54 +73,39 @@ interface SeedResult {
  * playable Bebop campaign. Safe to call repeatedly — re-running won't
  * create duplicate campaigns or reset an in-flight campaign's state.
  */
-export async function seedBebopCampaign(db: Db, userId: string): Promise<SeedResult> {
+export async function seedBebopCampaign(userId: string): Promise<SeedResult> {
   const bebop = loadBebopProfile();
+  const db = getFirebaseFirestore();
 
-  // 1. Upsert profile by slug (shared across all users)
-  const [existingProfile] = await db
-    .select({ id: profiles.id })
-    .from(profiles)
-    .where(eq(profiles.slug, BEBOP_PROFILE_SLUG))
-    .limit(1);
+  // 1. Upsert profile by slug (shared across all users).
+  const profilesCol = db.collection(COL.profiles);
+  const existingProfileSnap = await profilesCol.where("slug", "==", BEBOP_PROFILE_SLUG).limit(1).get();
   let profileId: string;
-  if (existingProfile) {
-    profileId = existingProfile.id;
-    await db
-      .update(profiles)
-      .set({ title: bebop.title, mediaType: bebop.media_type, content: bebop })
-      .where(eq(profiles.id, profileId));
-  } else {
-    const [created] = await db
-      .insert(profiles)
-      .values({
-        slug: BEBOP_PROFILE_SLUG,
+  if (!existingProfileSnap.empty) {
+    const doc = existingProfileSnap.docs[0];
+    if (!doc) throw new Error("profile snapshot empty after non-empty check");
+    profileId = doc.id;
+    await doc.ref.set(
+      {
         title: bebop.title,
         mediaType: bebop.media_type,
         content: bebop,
-      })
-      .returning({ id: profiles.id });
-    if (!created) throw new Error("profile insert returned nothing");
-    profileId = created.id;
+      },
+      { merge: true },
+    );
+  } else {
+    const ref = await profilesCol.add({
+      slug: BEBOP_PROFILE_SLUG,
+      title: bebop.title,
+      mediaType: bebop.media_type,
+      content: bebop,
+      version: 1,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    profileId = ref.id;
   }
 
-  // 2. Check for existing campaign by (user, name). If present, skip —
-  //    don't clobber a campaign the player may have turns in.
-  const [existingCampaign] = await db
-    .select({ id: campaigns.id })
-    .from(campaigns)
-    .where(
-      and(
-        eq(campaigns.userId, userId),
-        eq(campaigns.name, BEBOP_CAMPAIGN_NAME),
-        isNull(campaigns.deletedAt),
-      ),
-    )
-    .limit(1);
-
-  // New-campaign seed includes the M1.5 multi-provider fields — provider
-  // + tier_models — so every campaign created after M1.5 lands with a
-  // well-formed provider config. Defaults to Anthropic via
-  // anthropicFallbackConfig(); user retunes via settings UI (Commit F).
+  // 2. Settings — M1.5 multi-provider config + Bebop opening world state.
   const providerConfig = anthropicFallbackConfig();
   const settings = {
     provider: providerConfig.provider,
@@ -139,69 +124,62 @@ export async function seedBebopCampaign(db: Db, userId: string): Promise<SeedRes
     overrides: [] as unknown[],
   };
 
-  if (existingCampaign) {
-    // Ensure character exists; re-insert nothing else.
-    const [ch] = await db
-      .select({ id: characters.id })
-      .from(characters)
-      .where(eq(characters.campaignId, existingCampaign.id))
-      .limit(1);
-    if (!ch) {
-      const [chNew] = await db
-        .insert(characters)
-        .values({
-          campaignId: existingCampaign.id,
-          name: SPIKE_CHARACTER.name,
-          concept: SPIKE_CHARACTER.concept,
-          powerTier: SPIKE_CHARACTER.power_tier,
-          sheet: SPIKE_CHARACTER.sheet,
-        })
-        .returning({ id: characters.id });
-      if (!chNew) throw new Error("character insert returned nothing");
-      return {
-        profileId,
-        campaignId: existingCampaign.id,
-        characterId: chNew.id,
-        created: false,
-      };
+  // 3. Check existing campaign: (ownerUid, name) where deletedAt is null.
+  // Firestore can't combine "==" and "==null" plus "!=null" in arbitrary
+  // ways, but a simple where-chain on equality holds.
+  const campaignsCol = db.collection(COL.campaigns);
+  const existingCampaignSnap = await campaignsCol
+    .where("ownerUid", "==", userId)
+    .where("name", "==", BEBOP_CAMPAIGN_NAME)
+    .where("deletedAt", "==", null)
+    .limit(1)
+    .get();
+
+  if (!existingCampaignSnap.empty) {
+    const campDoc = existingCampaignSnap.docs[0];
+    if (!campDoc) throw new Error("campaign snapshot empty after non-empty check");
+    const charactersCol = campDoc.ref.collection(CAMPAIGN_SUB.characters);
+    const charsSnap = await charactersCol.limit(1).get();
+    if (!charsSnap.empty) {
+      const charDoc = charsSnap.docs[0];
+      if (!charDoc) throw new Error("character snapshot empty after non-empty check");
+      return { profileId, campaignId: campDoc.id, characterId: charDoc.id, created: false };
     }
-    return {
-      profileId,
-      campaignId: existingCampaign.id,
-      characterId: ch.id,
-      created: false,
-    };
-  }
-
-  // 3. Create campaign + character in one shot
-  const [campaign] = await db
-    .insert(campaigns)
-    .values({
-      userId,
-      name: BEBOP_CAMPAIGN_NAME,
-      phase: "playing",
-      profileRefs: [BEBOP_PROFILE_SLUG],
-      settings,
-    })
-    .returning({ id: campaigns.id });
-  if (!campaign) throw new Error("campaign insert returned nothing");
-
-  const [character] = await db
-    .insert(characters)
-    .values({
-      campaignId: campaign.id,
+    // Campaign exists but no character — recover by creating one.
+    const charRef = await charactersCol.add({
+      campaignId: campDoc.id,
       name: SPIKE_CHARACTER.name,
       concept: SPIKE_CHARACTER.concept,
       powerTier: SPIKE_CHARACTER.power_tier,
       sheet: SPIKE_CHARACTER.sheet,
-    })
-    .returning({ id: characters.id });
-  if (!character) throw new Error("character insert returned nothing");
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return { profileId, campaignId: campDoc.id, characterId: charRef.id, created: false };
+  }
+
+  // 4. Create campaign + character.
+  const campaignRef = await campaignsCol.add({
+    ownerUid: userId,
+    name: BEBOP_CAMPAIGN_NAME,
+    phase: "playing",
+    profileRefs: [BEBOP_PROFILE_SLUG],
+    settings,
+    createdAt: FieldValue.serverTimestamp(),
+    deletedAt: null,
+  });
+  const characterRef = await campaignRef.collection(CAMPAIGN_SUB.characters).add({
+    campaignId: campaignRef.id,
+    name: SPIKE_CHARACTER.name,
+    concept: SPIKE_CHARACTER.concept,
+    powerTier: SPIKE_CHARACTER.power_tier,
+    sheet: SPIKE_CHARACTER.sheet,
+    createdAt: FieldValue.serverTimestamp(),
+  });
 
   return {
     profileId,
-    campaignId: campaign.id,
-    characterId: character.id,
+    campaignId: campaignRef.id,
+    characterId: characterRef.id,
     created: true,
   };
 }
