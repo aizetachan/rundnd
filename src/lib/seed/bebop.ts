@@ -77,33 +77,25 @@ export async function seedBebopCampaign(userId: string): Promise<SeedResult> {
   const bebop = loadBebopProfile();
   const db = getFirebaseFirestore();
 
-  // 1. Upsert profile by slug (shared across all users).
-  const profilesCol = db.collection(COL.profiles);
-  const existingProfileSnap = await profilesCol.where("slug", "==", BEBOP_PROFILE_SLUG).limit(1).get();
-  let profileId: string;
-  if (!existingProfileSnap.empty) {
-    const doc = existingProfileSnap.docs[0];
-    if (!doc) throw new Error("profile snapshot empty after non-empty check");
-    profileId = doc.id;
-    await doc.ref.set(
-      {
-        title: bebop.title,
-        mediaType: bebop.media_type,
-        content: bebop,
-      },
-      { merge: true },
-    );
-  } else {
-    const ref = await profilesCol.add({
+  // 1. Upsert profile by slug. Using the slug as the doc id makes this
+  // race-free: two concurrent first-deploy calls both write to the same
+  // doc and last-writer-wins on identical content. The previous query
+  // → add() pattern would have created duplicate profiles under storm
+  // load. `serverTimestamp` for createdAt only fires on the first write
+  // because subsequent set merges don't overwrite an already-present
+  // timestamp; the version field stays 1 for the same reason.
+  const profileId = BEBOP_PROFILE_SLUG;
+  await db.collection(COL.profiles).doc(profileId).set(
+    {
       slug: BEBOP_PROFILE_SLUG,
       title: bebop.title,
       mediaType: bebop.media_type,
       content: bebop,
       version: 1,
       createdAt: FieldValue.serverTimestamp(),
-    });
-    profileId = ref.id;
-  }
+    },
+    { merge: true },
+  );
 
   // 2. Settings — M1.5 multi-provider config + Bebop opening world state.
   const providerConfig = anthropicFallbackConfig();

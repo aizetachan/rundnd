@@ -23,19 +23,25 @@ export async function ensureUserSeeded(user: AppUser): Promise<void> {
   if (!user.email) return;
   const db = getFirebaseFirestore();
   const userRef = db.collection(COL.users).doc(user.id);
-  const snap = await userRef.get();
-  if (!snap.exists) {
-    await userRef.set({
-      id: user.id,
-      email: user.email,
-      createdAt: FieldValue.serverTimestamp(),
-      deletedAt: null,
-      dailyCostCapUsd: null,
-    });
-  } else {
-    // Keep email fresh if the user changed it on the auth provider side,
-    // but never clobber locally-set fields (set merge respects them).
-    await userRef.set({ email: user.email }, { merge: true });
-  }
+  // Transaction so a concurrent first-time POST can't both create-then-
+  // clobber the doc. Plain set merge would race AND would also wipe a
+  // previously-set dailyCostCapUsd back to null on every call (Firestore
+  // merge writes nulls verbatim, it doesn't skip them). The transaction
+  // reads first, then either creates the full default doc or refreshes
+  // only the email — preserving the cap and createdAt invariants.
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(userRef);
+    if (!snap.exists) {
+      tx.set(userRef, {
+        id: user.id,
+        email: user.email,
+        createdAt: FieldValue.serverTimestamp(),
+        deletedAt: null,
+        dailyCostCapUsd: null,
+      });
+    } else {
+      tx.set(userRef, { email: user.email }, { merge: true });
+    }
+  });
   await seedBebopCampaign(user.id);
 }
