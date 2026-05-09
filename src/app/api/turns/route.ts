@@ -1,3 +1,4 @@
+import { getCurrentUser } from "@/lib/auth";
 import { checkBudget, incrementCostLedger } from "@/lib/budget";
 import { getDb } from "@/lib/db";
 import { getLangfuse } from "@/lib/observability/langfuse";
@@ -7,7 +8,6 @@ import { CampaignSettings } from "@/lib/types/campaign-settings";
 import { chronicleTurn, computeArcTrigger } from "@/lib/workflow/chronicle";
 import { runMeta, shouldDispatchMeta } from "@/lib/workflow/meta";
 import { runTurn } from "@/lib/workflow/turn";
-import { currentUser } from "@clerk/nextjs/server";
 import { and, eq, isNull } from "drizzle-orm";
 import { NextResponse, after } from "next/server";
 import { z } from "zod";
@@ -75,7 +75,7 @@ function buildTraceHandle(
 }
 
 export async function POST(req: Request) {
-  const user = await currentUser();
+  const user = await getCurrentUser();
   if (!user) {
     console.warn("[turns] 401 unauthenticated");
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });

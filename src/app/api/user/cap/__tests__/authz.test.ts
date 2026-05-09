@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * /api/user/cap authz tests (Commit 9, plan #15).
+ * /api/user/cap authz tests (M0.5 — Firebase Auth migration).
  *
  * The endpoint takes `{ capUsd }` in the body — deliberately no
- * userId. Session identity from Clerk's `currentUser()` IS the
- * authorization, so user A cannot set user B's cap by crafting a
- * body: there is no body field to spoof. These tests lock that
- * contract in.
+ * userId. Session identity from Firebase's session cookie (resolved by
+ * `getCurrentUser`) IS the authorization, so user A cannot set user B's
+ * cap by crafting a body: there is no body field to spoof. These tests
+ * lock that contract in.
  */
 
-vi.mock("@clerk/nextjs/server", () => ({
-  currentUser: vi.fn(),
+vi.mock("@/lib/auth", () => ({
+  getCurrentUser: vi.fn(),
 }));
 
 vi.mock("@/lib/budget", () => ({
@@ -24,8 +24,8 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("401s when the request is unauthenticated", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue(null);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue(null);
     const { POST } = await import("../route");
     const req = new Request("http://localhost/api/user/cap", {
       method: "POST",
@@ -39,10 +39,11 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("uses the session user.id — never a userId from the body", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue({ id: "session-user-A" } as unknown as Awaited<
-      ReturnType<typeof currentUser>
-    >);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue({
+      id: "session-user-A",
+      email: "a@example.com",
+    });
     const budget = await import("@/lib/budget");
     const { POST } = await import("../route");
     // Try to set a cap while claiming (via body) a different userId.
@@ -62,10 +63,8 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("accepts null to clear the cap", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue({ id: "u1" } as unknown as Awaited<
-      ReturnType<typeof currentUser>
-    >);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: "u1", email: null });
     const budget = await import("@/lib/budget");
     const { POST } = await import("../route");
     const req = new Request("http://localhost/api/user/cap", {
@@ -79,10 +78,8 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("accepts 0 distinctly from null (zero-spend day)", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue({ id: "u1" } as unknown as Awaited<
-      ReturnType<typeof currentUser>
-    >);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: "u1", email: null });
     const budget = await import("@/lib/budget");
     const { POST } = await import("../route");
     const req = new Request("http://localhost/api/user/cap", {
@@ -96,10 +93,8 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("400s on negative cap", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue({ id: "u1" } as unknown as Awaited<
-      ReturnType<typeof currentUser>
-    >);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: "u1", email: null });
     const budget = await import("@/lib/budget");
     const { POST } = await import("../route");
     const req = new Request("http://localhost/api/user/cap", {
@@ -113,10 +108,8 @@ describe("/api/user/cap — authz", () => {
   });
 
   it("400s on non-numeric cap", async () => {
-    const { currentUser } = await import("@clerk/nextjs/server");
-    vi.mocked(currentUser).mockResolvedValue({ id: "u1" } as unknown as Awaited<
-      ReturnType<typeof currentUser>
-    >);
+    const { getCurrentUser } = await import("@/lib/auth");
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: "u1", email: null });
     const budget = await import("@/lib/budget");
     const { POST } = await import("../route");
     const req = new Request("http://localhost/api/user/cap", {

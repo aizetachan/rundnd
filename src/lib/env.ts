@@ -36,15 +36,6 @@ const envSchema = z.object({
   NEXT_PUBLIC_ALGOLIA_APP_ID: z.string().optional(),
   NEXT_PUBLIC_ALGOLIA_SEARCH_KEY: z.string().optional(),
 
-  // --- Clerk auth (DEPRECATED — being removed in M0.5 Fase 2) ---
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().optional(),
-  CLERK_SECRET_KEY: z.string().optional(),
-  CLERK_WEBHOOK_SECRET: z.string().optional(),
-  NEXT_PUBLIC_CLERK_SIGN_IN_URL: z.string().default("/sign-in"),
-  NEXT_PUBLIC_CLERK_SIGN_UP_URL: z.string().default("/sign-up"),
-  NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: z.string().default("/campaigns"),
-  NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: z.string().default("/campaigns"),
-
   // --- LLM providers (commit 4) ---
   ANTHROPIC_API_KEY: z.string().optional(),
   GOOGLE_API_KEY: z.string().optional(),

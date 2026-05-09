@@ -36,7 +36,6 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
     "@anthropic-ai/sdk": "^0.90.0",
-    "@clerk/nextjs": "^7.2.3",
     "@google/genai": "^1.50.1",
     "@mastra/core": "^1.25.0",
     "algoliasearch": "^5.52.1",
@@ -51,7 +50,6 @@
     "posthog-node": "^5.29.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "svix": "^1.90.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

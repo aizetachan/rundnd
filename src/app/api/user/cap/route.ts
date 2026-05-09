@@ -1,5 +1,5 @@
+import { getCurrentUser } from "@/lib/auth";
 import { setUserDailyCap } from "@/lib/budget";
-import { currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -26,7 +26,7 @@ const Body = z.object({
 });
 
 export async function POST(req: Request) {
-  const user = await currentUser();
+  const user = await getCurrentUser();
   if (!user) {
     console.warn("[user/cap] 401 unauthenticated");
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });

@@ -1,5 +1,5 @@
 import { PostHogIdentify } from "@/components/posthog-identify";
-import { UserButton } from "@clerk/nextjs";
+import { UserMenu } from "@/components/user-menu";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -11,7 +11,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         <Link href="/campaigns" className="text-lg font-semibold tracking-tight">
           AIDM
         </Link>
-        <UserButton />
+        <UserMenu />
       </header>
       <main className="mx-auto max-w-4xl px-6 py-10">{children}</main>
     </div>

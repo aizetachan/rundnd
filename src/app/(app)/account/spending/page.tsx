@@ -1,5 +1,5 @@
+import { getCurrentUser } from "@/lib/auth";
 import { getBudgetSnapshot } from "@/lib/budget";
-import { currentUser } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SpendingForm } from "./spending-form";
@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
  * legitimate "zero-spend day" choice, distinct from null (no cap).
  */
 export default async function SpendingPage() {
-  const user = await currentUser();
+  const user = await getCurrentUser();
   if (!user) redirect("/sign-in");
   const snapshot = await getBudgetSnapshot(user.id);
 

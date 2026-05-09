@@ -1,5 +1,5 @@
+import { getCurrentUser } from "@/lib/auth";
 import { getBudgetSnapshot } from "@/lib/budget";
-import { currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
  * snapshot. No campaign scoping; budget is a user-level concept.
  */
 export async function GET() {
-  const user = await currentUser();
+  const user = await getCurrentUser();
   if (!user) {
     console.warn("[budget] 401 unauthenticated");
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });

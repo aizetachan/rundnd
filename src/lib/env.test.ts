@@ -18,10 +18,10 @@ describe("env Proxy", () => {
     expect(env.DATABASE_URL).toBe("postgres://user:pass@localhost:5432/db");
   });
 
-  it("throws ZodError when DATABASE_URL is missing and is accessed", async () => {
+  it("leaves DATABASE_URL undefined when unset (optional during M0.5 Firebase migration)", async () => {
     Reflect.deleteProperty(process.env, "DATABASE_URL");
     const { env } = await import("./env");
-    expect(() => env.DATABASE_URL).toThrow();
+    expect(env.DATABASE_URL).toBeUndefined();
   });
 
   it("applies default for NODE_ENV when unset", async () => {
