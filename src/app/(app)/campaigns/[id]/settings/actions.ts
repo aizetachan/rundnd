@@ -1,10 +1,9 @@
 "use server";
 
 import { getCurrentUser } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
 import { CampaignProviderValidationError } from "@/lib/providers";
-import { campaigns } from "@/lib/state/schema";
-import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { mergeSettingsWithProviderConfig, serializeProviderConfigToken } from "./merge";
 
@@ -42,32 +41,35 @@ export async function saveCampaignModelContext(
     return { ok: false, code: "unauthenticated", message: "Please sign in again." };
   }
 
-  const db = getDb();
+  const firestore = getFirebaseFirestore();
+  const ref = firestore.collection(COL.campaigns).doc(campaignId);
 
   // Fetch existing campaign + settings. Must belong to this user.
-  const [row] = await db
-    .select({ settings: campaigns.settings })
-    .from(campaigns)
-    .where(
-      and(eq(campaigns.id, campaignId), eq(campaigns.userId, user.id), isNull(campaigns.deletedAt)),
-    )
-    .limit(1);
-
-  if (!row) {
+  const snap = await ref.get();
+  if (!snap.exists) {
     return {
       ok: false,
       code: "campaign_not_found",
       message: "Campaign not found or not yours.",
     };
   }
+  const cd = snap.data();
+  if (!cd || cd.ownerUid !== user.id || cd.deletedAt !== null) {
+    return {
+      ok: false,
+      code: "campaign_not_found",
+      message: "Campaign not found or not yours.",
+    };
+  }
+  const currentSettings = cd.settings ?? {};
 
   // Optimistic concurrency check (FU-1). Token was computed at page
-  // load; re-compute from the current DB row. If they don't match,
+  // load; re-compute from the current doc. If they don't match,
   // another tab saved between the user's load and submit — surface a
   // stale-save error with a reload prompt rather than silently
   // overwriting their sibling tab's changes.
   if (configToken !== undefined) {
-    const currentToken = serializeProviderConfigToken(row.settings);
+    const currentToken = serializeProviderConfigToken(currentSettings);
     if (currentToken !== configToken) {
       return {
         ok: false,
@@ -83,7 +85,7 @@ export async function saveCampaignModelContext(
   // to the form.
   let nextSettings: Record<string, unknown>;
   try {
-    nextSettings = mergeSettingsWithProviderConfig(row.settings, input);
+    nextSettings = mergeSettingsWithProviderConfig(currentSettings, input);
   } catch (err) {
     if (err instanceof CampaignProviderValidationError) {
       return { ok: false, code: err.code, message: err.message };
@@ -95,7 +97,7 @@ export async function saveCampaignModelContext(
     };
   }
 
-  await db.update(campaigns).set({ settings: nextSettings }).where(eq(campaigns.id, campaignId));
+  await ref.set({ settings: nextSettings }, { merge: true });
 
   // Invalidate the play and settings pages so SSR picks up the new
   // provider on the next navigation. The write has already committed

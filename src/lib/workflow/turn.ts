@@ -5,15 +5,15 @@ import type { CompositionMode } from "@/lib/agents/scale-selector-agent";
 import { type AgentLogger, defaultLogger } from "@/lib/agents/types";
 import { judgeOutcomeWithValidation } from "@/lib/agents/validator";
 import type { WorldBuilderFlag } from "@/lib/agents/world-builder";
-import type { Db } from "@/lib/db";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import type { Firestore } from "firebase-admin/firestore";
-// During M0.5 Fase 3 the workflow needs Firestore at runtime but the
-// Drizzle-mocked tests inject a fake db and don't expect Firestore. To
-// keep both paths working, skip Firestore in the test environment so
-// authorizeCampaignAccess + the chronicler tools fall back to ctx.db.
-// Catches the lazy-init throw too, so missing FIREBASE_PROJECT_ID is
-// still tolerated outside of test.
+import { FieldValue } from "firebase-admin/firestore";
+// Tests inject `deps.firestore` directly. The runtime entrypoint (route
+// handler) calls tryGetFirestore for the lazy admin singleton. Outside
+// of test, missing project credentials throws lazily — surface that as
+// the obvious "FIREBASE_PROJECT_ID not configured" error rather than a
+// silent no-op.
 function tryGetFirestore(): Firestore | undefined {
   if (process.env.NODE_ENV === "test") return undefined;
   try {
@@ -38,31 +38,29 @@ import {
 } from "@/lib/providers";
 import { assembleSessionContextBlocks } from "@/lib/rules/context-blocks";
 import { assembleSessionRuleLibraryGuidance, getBeatCraftGuidance } from "@/lib/rules/library";
-import { campaigns, characters, npcs, profiles, turns } from "@/lib/state/schema";
 import { type AidmSpanHandle, type AidmToolContext, invokeTool } from "@/lib/tools";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
 import { Profile } from "@/lib/types/profile";
 import type { IntentOutput, OutcomeOutput } from "@/lib/types/turn";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
 
 /**
  * The turn workflow — what happens between "player hit send" and "KA's
  * last token reaches the browser."
  *
  * Shape (§6.1, KA-orchestrated):
- *   1. Acquire per-campaign Postgres advisory lock (concurrent turns
- *      for the same campaign serialize; 15s timeout).
+ *   1. Acquire per-campaign Firestore lock (concurrent turns for the
+ *      same campaign serialize via a flag-doc mutex; 15s timeout).
  *   2. Load campaign + profile + character + working memory (last N
- *      turn rows).
+ *      turn docs).
  *   3. Run the routing pre-pass (IntentClassifier → route → maybe
  *      WorldBuilder / OverrideHandler).
  *   4. If router short-circuits (META/WB-reject/WB-clarify/OVERRIDE),
- *      persist the turn row with the router's response, release the
+ *      persist the turn doc with the router's response, release the
  *      lock, and return — no KA call.
  *   5. Otherwise render the 4 KA blocks, pick sakuga mode, spawn KA.
  *   6. Stream KA deltas to the caller as they arrive. Buffer for
  *      persistence.
- *   7. On KA `final`, persist the turn row (narrative, fingerprints,
+ *   7. On KA `final`, persist the turn doc (narrative, fingerprints,
  *      cost, timing, portrait map), release the lock, yield terminal.
  *
  * Returns an async generator of events the Route Handler forwards as
@@ -77,7 +75,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
  */
 
 const WORKING_MEMORY_TURNS = 6;
-const ADVISORY_LOCK_TIMEOUT_MS = 15_000;
+const TURN_LOCK_TIMEOUT_MS = 15_000;
 
 /**
  * Render Block 4's `{{player_assertion}}` slot from the router's
@@ -181,6 +179,20 @@ function parsePowerTier(s: string | null | undefined): number | null {
 }
 
 /**
+ * Loaded character shape (denormalized from Firestore docs). Replaces
+ * the prior Drizzle `characters.$inferSelect` row.
+ */
+export interface LoadedCharacter {
+  id: string;
+  campaignId: string;
+  name: string;
+  concept: string;
+  powerTier: string;
+  sheet: unknown;
+  createdAt: Date | null;
+}
+
+/**
  * Effective per-turn composition mode (§7.3 scale-selector, deterministic
  * compute — not a model call). v3's scale-selector reframed stakes when
  * attacker/defender tier gap was wide: a Tier 3 hero against a Tier 9
@@ -194,9 +206,9 @@ function parsePowerTier(s: string | null | undefined): number | null {
  * guessing.
  */
 export async function computeEffectiveCompositionMode(
-  db: Db,
+  firestore: Firestore,
   campaignId: string,
-  character: typeof characters.$inferSelect | null,
+  character: LoadedCharacter | null,
   intent: IntentOutput,
   scene: { present_npcs?: string[] | null } | undefined,
 ): Promise<CompositionMode> {
@@ -211,11 +223,14 @@ export async function computeEffectiveCompositionMode(
   const defenderName = intent.target ?? scene?.present_npcs?.[0];
   if (!defenderName) return "not_applicable";
 
-  const [npcRow] = await db
-    .select({ powerTier: npcs.powerTier })
-    .from(npcs)
-    .where(and(eq(npcs.campaignId, campaignId), eq(npcs.name, defenderName)))
-    .limit(1);
+  const npcSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.npcs)
+    .where("name", "==", defenderName)
+    .limit(1)
+    .get();
+  const npcRow = npcSnap.docs[0]?.data();
   const defenderTier = parsePowerTier(npcRow?.powerTier);
   if (defenderTier === null) return "not_applicable";
 
@@ -302,7 +317,7 @@ export interface TurnWorkflowInput {
 }
 
 export interface TurnWorkflowDeps {
-  db: Db;
+  firestore: Firestore;
   trace?: AidmSpanHandle;
   logger?: AgentLogger;
   routerDeps?: RouterDeps;
@@ -359,45 +374,83 @@ export type TurnWorkflowEvent =
   | { type: "error"; message: string };
 
 // ---------------------------------------------------------------------------
-// Advisory lock
+// Lock — Firestore-doc mutex on the campaign (replaces pg_advisory_lock).
 // ---------------------------------------------------------------------------
 
-/** Hash a UUID into a pair of int4s for pg_advisory_lock. Stable. */
-function campaignToLockKeys(campaignId: string): [number, number] {
-  // Treat the UUID as 32 hex chars; fold to two 32-bit signed ints.
-  const hex = campaignId.replace(/-/g, "");
-  const upper = Number.parseInt(hex.slice(0, 8), 16) | 0;
-  const lower = Number.parseInt(hex.slice(8, 16), 16) | 0;
-  return [upper, lower];
+/**
+ * Try-once lock acquisition: returns true if we now hold
+ * `turnInFlight=true`, false if another turn is already running and is
+ * still within the timeout window. The transaction makes two
+ * simultaneous turns deterministic — exactly one observes inFlight=false
+ * (or stale timestamp) and proceeds.
+ */
+async function tryClaimTurnLock(
+  firestore: Firestore,
+  campaignId: string,
+): Promise<boolean> {
+  const ref = firestore.collection(COL.campaigns).doc(campaignId);
+  return await firestore.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return false;
+    const data = snap.data() ?? {};
+    const inFlight = data.turnInFlight === true;
+    const startedRaw = data.turnStartedAt;
+    const startedAtMs =
+      startedRaw && typeof (startedRaw as { toMillis?: () => number }).toMillis === "function"
+        ? (startedRaw as { toMillis: () => number }).toMillis()
+        : startedRaw instanceof Date
+          ? startedRaw.getTime()
+          : 0;
+    const ageMs = Date.now() - startedAtMs;
+    if (inFlight && ageMs < TURN_LOCK_TIMEOUT_MS) return false;
+    tx.set(
+      ref,
+      { turnInFlight: true, turnStartedAt: FieldValue.serverTimestamp() },
+      { merge: true },
+    );
+    return true;
+  });
 }
 
-async function tryAcquireLock(db: Db, campaignId: string, timeoutMs: number): Promise<boolean> {
-  const [k1, k2] = campaignToLockKeys(campaignId);
+async function tryAcquireLock(
+  firestore: Firestore,
+  campaignId: string,
+  timeoutMs: number,
+): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const result = await db.execute<{ locked: boolean }>(
-      sql`SELECT pg_try_advisory_lock(${k1}::int, ${k2}::int) AS locked`,
-    );
-    const row = (result.rows ?? (result as unknown as Array<{ locked: boolean }>))[0];
-    if (row?.locked) return true;
+    if (await tryClaimTurnLock(firestore, campaignId)) return true;
     await new Promise((r) => setTimeout(r, 200));
   }
   return false;
 }
 
-async function releaseLock(db: Db, campaignId: string): Promise<void> {
-  const [k1, k2] = campaignToLockKeys(campaignId);
-  await db.execute(sql`SELECT pg_advisory_unlock(${k1}::int, ${k2}::int)`);
+async function releaseLock(firestore: Firestore, campaignId: string): Promise<void> {
+  await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .set({ turnInFlight: false }, { merge: true });
 }
 
 // ---------------------------------------------------------------------------
 // Data loading
 // ---------------------------------------------------------------------------
 
+interface LoadedCampaign {
+  id: string;
+  ownerUid: string;
+  name: string;
+  phase: string;
+  profileRefs: string[];
+  settings: Record<string, unknown>;
+  createdAt: Date | null;
+  deletedAt: Date | null;
+}
+
 interface LoadedContext {
-  campaignRow: typeof campaigns.$inferSelect;
+  campaign: LoadedCampaign;
   profile: Profile;
-  characterRow: typeof characters.$inferSelect | null;
+  character: LoadedCharacter | null;
   workingMemory: Array<{
     turn_number: number;
     player_message: string;
@@ -407,53 +460,92 @@ interface LoadedContext {
   nextTurnNumber: number;
 }
 
-async function loadTurnContext(db: Db, campaignId: string, userId: string): Promise<LoadedContext> {
-  const [campaignRow] = await db
-    .select()
-    .from(campaigns)
-    .where(
-      and(eq(campaigns.id, campaignId), eq(campaigns.userId, userId), isNull(campaigns.deletedAt)),
-    )
-    .limit(1);
-  if (!campaignRow) throw new Error("Campaign not found");
+async function loadTurnContext(
+  firestore: Firestore,
+  campaignId: string,
+  userId: string,
+): Promise<LoadedContext> {
+  const campaignSnap = await firestore.collection(COL.campaigns).doc(campaignId).get();
+  if (!campaignSnap.exists) throw new Error("Campaign not found");
+  const cd = campaignSnap.data() ?? {};
+  if (cd.ownerUid !== userId || cd.deletedAt !== null) {
+    throw new Error("Campaign not found");
+  }
+  const campaign: LoadedCampaign = {
+    id: campaignSnap.id,
+    ownerUid: typeof cd.ownerUid === "string" ? cd.ownerUid : "",
+    name: typeof cd.name === "string" ? cd.name : "",
+    phase: typeof cd.phase === "string" ? cd.phase : "sz",
+    profileRefs: Array.isArray(cd.profileRefs) ? (cd.profileRefs as string[]) : [],
+    settings:
+      typeof cd.settings === "object" && cd.settings !== null
+        ? (cd.settings as Record<string, unknown>)
+        : {},
+    createdAt: cd.createdAt instanceof Date ? cd.createdAt : null,
+    deletedAt: cd.deletedAt instanceof Date ? cd.deletedAt : null,
+  };
 
-  const profileRefs = campaignRow.profileRefs as string[];
-  const primarySlug = profileRefs[0];
+  const primarySlug = campaign.profileRefs[0];
   if (!primarySlug) throw new Error("Campaign has no profile_refs");
-  const [profileRow] = await db
-    .select()
-    .from(profiles)
-    .where(eq(profiles.slug, primarySlug))
-    .limit(1);
-  if (!profileRow) throw new Error(`Profile ${primarySlug} not found`);
-  const profile = Profile.parse(profileRow.content);
+  const profileSnap = await firestore
+    .collection(COL.profiles)
+    .where("slug", "==", primarySlug)
+    .limit(1)
+    .get();
+  const profileDoc = profileSnap.docs[0];
+  if (!profileDoc) throw new Error(`Profile ${primarySlug} not found`);
+  const profile = Profile.parse(profileDoc.data().content);
 
-  const [characterRow] = await db
-    .select()
-    .from(characters)
-    .where(eq(characters.campaignId, campaignId))
-    .limit(1);
+  const charSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.characters)
+    .limit(1)
+    .get();
+  const charDoc = charSnap.docs[0];
+  const character: LoadedCharacter | null = charDoc
+    ? {
+        id: charDoc.id,
+        campaignId,
+        name: typeof charDoc.data().name === "string" ? (charDoc.data().name as string) : "",
+        concept:
+          typeof charDoc.data().concept === "string" ? (charDoc.data().concept as string) : "",
+        powerTier:
+          typeof charDoc.data().powerTier === "string"
+            ? (charDoc.data().powerTier as string)
+            : "T10",
+        sheet: charDoc.data().sheet ?? {},
+        createdAt:
+          charDoc.data().createdAt instanceof Date ? (charDoc.data().createdAt as Date) : null,
+      }
+    : null;
 
-  const recent = await db
-    .select({
-      turn_number: turns.turnNumber,
-      player_message: turns.playerMessage,
-      narrative_text: turns.narrativeText,
-      style_drift_used: turns.styleDriftUsed,
-    })
-    .from(turns)
-    .where(eq(turns.campaignId, campaignId))
-    .orderBy(desc(turns.turnNumber))
-    .limit(WORKING_MEMORY_TURNS);
+  const recentSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.turns)
+    .orderBy("turnNumber", "desc")
+    .limit(WORKING_MEMORY_TURNS)
+    .get();
+  const recent = recentSnap.docs.map((d) => {
+    const r = d.data();
+    return {
+      turn_number: typeof r.turnNumber === "number" ? r.turnNumber : 0,
+      player_message: typeof r.playerMessage === "string" ? r.playerMessage : "",
+      narrative_text: typeof r.narrativeText === "string" ? r.narrativeText : "",
+      style_drift_used:
+        typeof r.styleDriftUsed === "string" ? (r.styleDriftUsed as string) : null,
+    };
+  });
 
   const workingMemory = recent.slice().reverse();
   const nextTurnNumber =
     workingMemory.length > 0 ? (workingMemory[workingMemory.length - 1]?.turn_number ?? 0) + 1 : 1;
 
   return {
-    campaignRow,
+    campaign,
     profile,
-    characterRow: characterRow ?? null,
+    character,
     workingMemory,
     nextTurnNumber,
   };
@@ -468,7 +560,7 @@ export async function* runTurn(
   deps: TurnWorkflowDeps,
 ): AsyncGenerator<TurnWorkflowEvent, void, void> {
   const logger = deps.logger ?? defaultLogger;
-  const { db } = deps;
+  const firestore = deps.firestore;
   // Correlation fields for every log emitted during this turn. Declared
   // at function entry so the outer catch block (which runs when
   // loadTurnContext throws BEFORE turnNumber is known) still has the
@@ -478,11 +570,11 @@ export async function* runTurn(
     userId: input.userId,
   };
 
-  const acquired = await tryAcquireLock(db, input.campaignId, ADVISORY_LOCK_TIMEOUT_MS);
+  const acquired = await tryAcquireLock(firestore, input.campaignId, TURN_LOCK_TIMEOUT_MS);
   if (!acquired) {
-    logger("warn", "runTurn: advisory lock timeout", {
+    logger("warn", "runTurn: turn lock timeout", {
       ...logContext,
-      timeoutMs: ADVISORY_LOCK_TIMEOUT_MS,
+      timeoutMs: TURN_LOCK_TIMEOUT_MS,
     });
     yield {
       type: "error",
@@ -492,26 +584,26 @@ export async function* runTurn(
   }
 
   try {
-    const ctx = await loadTurnContext(db, input.campaignId, input.userId);
-    const settings = (ctx.campaignRow.settings ?? {}) as Record<string, unknown>;
+    const ctx = await loadTurnContext(firestore, input.campaignId, input.userId);
+    const settings = ctx.campaign.settings;
     // Resolve per-campaign provider + tier_models once and thread it
     // through every sub-agent call on this turn. A misconfigured
     // campaign (e.g. selecting Google before M3.5) throws here and
     // surfaces as a terminal turn error to the player.
-    const modelContext = resolveModelContext(ctx.campaignRow.settings, logger);
+    const modelContext = resolveModelContext(ctx.campaign.settings, logger);
 
     // Fill in turnNumber now that context is loaded — outer catch was
     // already seeded with campaignId/userId at function entry.
     logContext.turnNumber = ctx.nextTurnNumber;
     logger("info", "runTurn: start", {
       ...logContext,
-      phase: ctx.campaignRow.phase,
+      phase: ctx.campaign.phase,
       provider: modelContext.provider,
     });
 
     // Per-turn prompt-fingerprint accumulator. Every agent call that
     // passes a `promptId` records its composed-prompt fingerprint here.
-    // Persisted on the turn row at the end so voice regressions are
+    // Persisted on the turn doc at the end so voice regressions are
     // traceable to the exact commit that changed any prompt file.
     const promptFingerprints: Record<string, string> = {};
     const recordPrompt = (agentName: string, fingerprint: string): void => {
@@ -541,10 +633,10 @@ export async function* runTurn(
         .slice(-3)
         .map((t) => `Turn ${t.turn_number}: ${t.narrative_text.slice(0, 200)}`)
         .join("\n"),
-      campaignPhase: ctx.campaignRow.phase === "sz" ? "sz" : "playing",
+      campaignPhase: ctx.campaign.phase === "sz" ? "sz" : "playing",
       canonicalityMode: "inspired", // M1 default; M2 sets this from SZ output
-      characterSummary: ctx.characterRow
-        ? `${ctx.characterRow.name} (${ctx.characterRow.powerTier}): ${ctx.characterRow.concept}`
+      characterSummary: ctx.character
+        ? `${ctx.character.name} (${ctx.character.powerTier}): ${ctx.character.concept}`
         : "",
       activeCanonRules: [],
       priorOverrides: Array.isArray(settings.overrides)
@@ -593,24 +685,28 @@ export async function* runTurn(
         response: responseText,
         turnNumber: ctx.nextTurnNumber,
       };
-      const [persisted] = await db
-        .insert(turns)
-        .values({
-          campaignId: input.campaignId,
-          turnNumber: ctx.nextTurnNumber,
-          playerMessage: input.playerMessage,
-          narrativeText: responseText,
-          intent: verdict.intent,
-          verdictKind: verdict.kind,
-          outcome: null,
-          promptFingerprints,
-          portraitMap: {},
-        })
-        .returning({ id: turns.id });
+      const turnsCol = firestore
+        .collection(COL.campaigns)
+        .doc(input.campaignId)
+        .collection(CAMPAIGN_SUB.turns);
+      const persistedRef = await turnsCol.add({
+        campaignId: input.campaignId,
+        turnNumber: ctx.nextTurnNumber,
+        playerMessage: input.playerMessage,
+        narrativeText: responseText,
+        intent: verdict.intent,
+        verdictKind: verdict.kind,
+        outcome: null,
+        promptFingerprints,
+        portraitMap: {},
+        chronicledAt: null,
+        flags: [],
+        createdAt: FieldValue.serverTimestamp(),
+      });
       logger("info", "runTurn: short-circuit persisted", {
         ...logContext,
         verdictKind: verdict.kind,
-        turnId: persisted?.id ?? "",
+        turnId: persistedRef.id,
       });
 
       // ---------------------------------------------------------------
@@ -648,10 +744,10 @@ export async function* runTurn(
         };
         const existing = Array.isArray(settings.overrides) ? settings.overrides : [];
         const newSettings = { ...settings, overrides: [...existing, newOverride] };
-        await db
-          .update(campaigns)
-          .set({ settings: newSettings })
-          .where(and(eq(campaigns.id, input.campaignId), eq(campaigns.userId, input.userId)));
+        await firestore
+          .collection(COL.campaigns)
+          .doc(input.campaignId)
+          .set({ settings: newSettings }, { merge: true });
       }
 
       // WB-CLARIFY no longer persists entities (the player is about to
@@ -661,7 +757,7 @@ export async function* runTurn(
 
       yield {
         type: "done",
-        turnId: persisted?.id ?? "",
+        turnId: persistedRef.id,
         turnNumber: ctx.nextTurnNumber,
         narrative: responseText,
         ttftMs: null,
@@ -689,7 +785,7 @@ export async function* runTurn(
     // -------------------------------------------------------------------
     // WB reshape: ACCEPT / FLAG now arrive on the continue path with a
     // `wbAssertion` payload. Persist the entities BEFORE KA runs so the
-    // new NPC/location/faction rows are visible to KA's tool calls
+    // new NPC/location/faction docs are visible to KA's tool calls
     // (e.g. `list_known_npcs` returning the NPC the player just
     // declared). Flags accumulate here and ride along to the done event;
     // CLARIFY never reaches this branch.
@@ -700,8 +796,7 @@ export async function* runTurn(
       const baseToolCtx: AidmToolContext = {
         campaignId: input.campaignId,
         userId: input.userId,
-        db,
-        firestore: tryGetFirestore(),
+        firestore: tryGetFirestore() ?? firestore,
         trace: deps.trace,
         logger,
         logContext,
@@ -810,9 +905,9 @@ export async function* runTurn(
       present_npcs?: string[];
     };
     const compositionMode = await computeEffectiveCompositionMode(
-      db,
+      firestore,
       input.campaignId,
-      ctx.characterRow,
+      ctx.character,
       verdict.intent,
       scene,
     );
@@ -832,22 +927,22 @@ export async function* runTurn(
         {
           intent: verdict.intent,
           playerMessage: input.playerMessage,
-          characterSummary: ctx.characterRow
+          characterSummary: ctx.character
             ? {
-                name: ctx.characterRow.name,
-                power_tier: ctx.characterRow.powerTier,
-                summary: ctx.characterRow.concept,
+                name: ctx.character.name,
+                power_tier: ctx.character.powerTier,
+                summary: ctx.character.concept,
               }
             : {},
           situation: routerInput.recentTurnsSummary,
           activeConsequences: [],
         },
         {
-          characterSummary: ctx.characterRow
+          characterSummary: ctx.character
             ? {
-                name: ctx.characterRow.name,
-                power_tier: ctx.characterRow.powerTier,
-                summary: ctx.characterRow.concept,
+                name: ctx.character.name,
+                power_tier: ctx.character.powerTier,
+                summary: ctx.character.concept,
               }
             : {},
           canonRules,
@@ -904,13 +999,17 @@ export async function* runTurn(
     //
     // Bounded at 1000 names — the detector's proper-noun set is O(n) in
     // match iteration, and a campaign with >1000 NPCs is implausible.
-    const npcCatalog = await db
-      .select({ name: npcs.name })
-      .from(npcs)
-      .where(eq(npcs.campaignId, input.campaignId))
-      .limit(1000);
+    const npcCatalogSnap = await firestore
+      .collection(COL.campaigns)
+      .doc(input.campaignId)
+      .collection(CAMPAIGN_SUB.npcs)
+      .limit(1000)
+      .get();
+    const npcCatalog = npcCatalogSnap.docs.map((d) => ({
+      name: typeof d.data().name === "string" ? (d.data().name as string) : "",
+    }));
     const properNouns = new Set<string>([
-      ...(ctx.characterRow ? [ctx.characterRow.name] : []),
+      ...(ctx.character ? [ctx.character.name] : []),
       ...npcCatalog.map((n) => n.name),
       ...(ctx.profile.ip_mechanics.voice_cards?.map((v) => v.name) ?? []),
     ]);
@@ -937,8 +1036,7 @@ export async function* runTurn(
     const toolContext: AidmToolContext = {
       campaignId: input.campaignId,
       userId: input.userId,
-      db,
-      firestore: tryGetFirestore(),
+      firestore,
       trace: deps.trace,
       logger,
       logContext,
@@ -966,19 +1064,19 @@ export async function* runTurn(
     const arcPhase = arcPlan.arc_phase ?? null;
     // Beat-craft guidance for the current arc phase (v3-parity Phase 7
     // MINOR #18). Null-safe: missing phase → null → Block 4 fallback.
-    const arcPhaseCraft = arcPhase ? await getBeatCraftGuidance(db, arcPhase) : null;
+    const arcPhaseCraft = arcPhase ? await getBeatCraftGuidance(firestore, arcPhase) : null;
     const budget = retrievalBudget(verdict.intent.epicness, verdict.intent);
 
     // Rule-library bundle for this session (v3-parity, Phase 2C of v3-audit
-    // closure). Pulled fresh each turn at M1 — four small DB roundtrips, a
-    // few KB of content. Will move to campaign.settings.session_cache in
-    // Phase 7 polish. Graceful degradation: lookup misses produce an empty
-    // section, never an error.
-    const sessionRuleLibrary = await assembleSessionRuleLibraryGuidance(db, {
+    // closure). Pulled fresh each turn at M1 — a few small Firestore
+    // round-trips, a few KB of content. Will move to
+    // campaign.settings.session_cache in Phase 7 polish. Graceful
+    // degradation: lookup misses produce an empty section, never an error.
+    const sessionRuleLibrary = await assembleSessionRuleLibraryGuidance(firestore, {
       profile: ctx.profile,
       activeDna: settings.active_dna as never,
       activeComposition: settings.active_composition as never,
-      characterPowerTier: ctx.characterRow?.powerTier ?? null,
+      characterPowerTier: ctx.character?.powerTier ?? null,
       campaignId: input.campaignId,
     });
 
@@ -987,7 +1085,7 @@ export async function* runTurn(
     // faction → location → npc; capped at ~10 blocks for token budget.
     // Chronicler drives block creation/updates via update_context_block
     // tool; blocks accumulate organically through play.
-    const sessionContextBlocks = await assembleSessionContextBlocks(db, input.campaignId);
+    const sessionContextBlocks = await assembleSessionContextBlocks(firestore, input.campaignId);
 
     const runKa = deps.runKa ?? runKeyAnimator;
     const kaIter = runKa(
@@ -1076,28 +1174,32 @@ export async function* runTurn(
     const portraitMap: Record<string, string | null> = {};
     for (const n of portraitNames) portraitMap[n] = null;
 
-    const [persisted] = await db
-      .insert(turns)
-      .values({
-        campaignId: input.campaignId,
-        turnNumber: ctx.nextTurnNumber,
-        playerMessage: input.playerMessage,
-        narrativeText: narrative,
-        intent: verdict.intent,
-        verdictKind: "continue",
-        outcome: outcome ?? null,
-        promptFingerprints,
-        portraitMap,
-        costUsd: turnCostUsd.toFixed(6),
-        ttftMs,
-        totalMs,
-        styleDriftUsed: styleDrift ?? null,
-        flags: wbAssertion?.flags ?? [],
-      })
-      .returning({ id: turns.id });
+    const turnsCol = firestore
+      .collection(COL.campaigns)
+      .doc(input.campaignId)
+      .collection(CAMPAIGN_SUB.turns);
+    const persistedRef = await turnsCol.add({
+      campaignId: input.campaignId,
+      turnNumber: ctx.nextTurnNumber,
+      playerMessage: input.playerMessage,
+      narrativeText: narrative,
+      intent: verdict.intent,
+      verdictKind: "continue",
+      outcome: outcome ?? null,
+      promptFingerprints,
+      portraitMap,
+      // costUsd stored as a number (Postgres NUMERIC was string-encoded).
+      costUsd: turnCostUsd,
+      ttftMs,
+      totalMs,
+      styleDriftUsed: styleDrift ?? null,
+      flags: wbAssertion?.flags ?? [],
+      chronicledAt: null,
+      createdAt: FieldValue.serverTimestamp(),
+    });
     logger("info", "runTurn: persisted", {
       ...logContext,
-      turnId: persisted?.id ?? "",
+      turnId: persistedRef.id,
       intent: verdict.intent.intent,
       ttftMs,
       totalMs,
@@ -1109,7 +1211,7 @@ export async function* runTurn(
 
     yield {
       type: "done",
-      turnId: persisted?.id ?? "",
+      turnId: persistedRef.id,
       turnNumber: ctx.nextTurnNumber,
       narrative,
       ttftMs,
@@ -1129,8 +1231,8 @@ export async function* runTurn(
     });
     yield { type: "error", message: msg };
   } finally {
-    await releaseLock(db, input.campaignId).catch(() => {
-      /* best-effort; pg will release on connection close */
+    await releaseLock(firestore, input.campaignId).catch(() => {
+      /* best-effort */
     });
   }
 }

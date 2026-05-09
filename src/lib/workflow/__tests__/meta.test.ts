@@ -1,12 +1,12 @@
-import type { Db } from "@/lib/db";
+import type { Firestore } from "firebase-admin/firestore";
 import { describe, expect, it } from "vitest";
 import { classifyMetaMessage, runMeta, shouldDispatchMeta } from "../meta";
 
 /**
  * Meta-conversation tests (Phase 5, v3-audit closure). Exercise the
- * pure classifier + the runMeta generator against a fake DB + stubbed
- * MetaDirector. Real DB + provider round-trips are acceptance-ritual
- * scope.
+ * pure classifier + the runMeta generator against a fake Firestore +
+ * stubbed MetaDirector. Real DB + provider round-trips are
+ * acceptance-ritual scope.
  */
 
 const CAMPAIGN = "22222222-2222-4222-9222-222222222222";
@@ -75,43 +75,48 @@ describe("shouldDispatchMeta — routing decision", () => {
 });
 
 // ---------------------------------------------------------------------------
-// runMeta integration — fake DB that tracks writes + stub MetaDirector.
+// runMeta integration — fake Firestore that tracks writes + stub MetaDirector.
 // ---------------------------------------------------------------------------
 
-interface FakeDbState {
+interface FakeFsState {
   settings: Record<string, unknown>;
-  updateCalls: Array<{ patch: unknown }>;
+  /** Each `set(merge=true)` payload — captured for assertion. */
+  setCalls: Array<Record<string, unknown>>;
 }
 
-function fakeDb(state: FakeDbState): Db {
-  return {
-    select: (_cols?: unknown) => ({
-      from: (_t: unknown) => ({
-        where: (_w: unknown) => ({
-          limit: async () => [
-            {
-              id: CAMPAIGN,
-              userId: USER,
-              settings: state.settings,
-              deletedAt: null,
-              name: "test",
-            },
-          ],
-          orderBy: (_o: unknown) => ({
-            limit: async () => [], // no prior turns
-          }),
+function fakeFirestore(state: FakeFsState): Firestore {
+  const campaignDocRef = {
+    get: async () => ({
+      exists: true,
+      data: () => ({
+        ownerUid: USER,
+        deletedAt: null,
+        name: "test",
+        settings: state.settings,
+        phase: "playing",
+        profileRefs: [],
+        createdAt: new Date(),
+      }),
+    }),
+    set: async (data: Record<string, unknown>, _opts?: { merge?: boolean }) => {
+      state.setCalls.push(data);
+    },
+    collection: (_name: string) => ({
+      orderBy: () => ({
+        limit: () => ({
+          get: async () => ({ empty: true, docs: [] }),
         }),
       }),
     }),
-    update: (_table: unknown) => ({
-      set: (patch: unknown) => {
-        state.updateCalls.push({ patch });
-        return {
-          where: async () => ({ rowCount: 1 }),
-        };
-      },
-    }),
-  } as unknown as Db;
+  };
+  return {
+    collection: (name: string) => {
+      if (name === "campaigns") {
+        return { doc: () => campaignDocRef };
+      }
+      throw new Error(`unexpected collection ${name}`);
+    },
+  } as unknown as Firestore;
 }
 
 const stubMetaDirector = (async () => ({
@@ -121,14 +126,14 @@ const stubMetaDirector = (async () => ({
 
 describe("runMeta — /meta entry path", () => {
   it("emits 'entered' then 'text' on a fresh /meta message", async () => {
-    const dbState: FakeDbState = { settings: {}, updateCalls: [] };
-    const db = fakeDb(dbState);
+    const state: FakeFsState = { settings: {}, setCalls: [] };
+    const firestore = fakeFirestore(state);
 
     const events: string[] = [];
     const texts: string[] = [];
     for await (const ev of runMeta(
       { campaignId: CAMPAIGN, userId: USER, playerMessage: "/meta less ornate prose" },
-      { db, runMetaDirectorFn: stubMetaDirector },
+      { firestore, runMetaDirectorFn: stubMetaDirector },
     )) {
       events.push(ev.type);
       if (ev.type === "text") texts.push(ev.delta);
@@ -138,8 +143,8 @@ describe("runMeta — /meta entry path", () => {
     expect(texts.join(" ")).toMatch(/noted/i);
 
     // Meta state persisted.
-    expect(dbState.updateCalls).toHaveLength(1);
-    const patch = dbState.updateCalls[0]?.patch as { settings: Record<string, unknown> };
+    expect(state.setCalls).toHaveLength(1);
+    const patch = state.setCalls[0] as { settings: Record<string, unknown> };
     const meta = patch.settings.meta_conversation as {
       active: boolean;
       history: Array<{ role: string; text: string }>;
@@ -151,7 +156,7 @@ describe("runMeta — /meta entry path", () => {
   });
 
   it("appends to existing history when meta is already active", async () => {
-    const dbState: FakeDbState = {
+    const state: FakeFsState = {
       settings: {
         meta_conversation: {
           active: true,
@@ -166,18 +171,18 @@ describe("runMeta — /meta entry path", () => {
           ],
         },
       },
-      updateCalls: [],
+      setCalls: [],
     };
-    const db = fakeDb(dbState);
+    const firestore = fakeFirestore(state);
 
     for await (const _ of runMeta(
       { campaignId: CAMPAIGN, userId: USER, playerMessage: "too much dwelling" },
-      { db, runMetaDirectorFn: stubMetaDirector },
+      { firestore, runMetaDirectorFn: stubMetaDirector },
     )) {
       /* drain */
     }
 
-    const patch = dbState.updateCalls[0]?.patch as { settings: Record<string, unknown> };
+    const patch = state.setCalls[0] as { settings: Record<string, unknown> };
     const meta = patch.settings.meta_conversation as {
       history: Array<{ role: string }>;
     };
@@ -187,7 +192,7 @@ describe("runMeta — /meta entry path", () => {
 
 describe("runMeta — /resume exits cleanly", () => {
   it("clears meta_conversation and emits exited with no suffix", async () => {
-    const dbState: FakeDbState = {
+    const state: FakeFsState = {
       settings: {
         meta_conversation: {
           active: true,
@@ -195,14 +200,14 @@ describe("runMeta — /resume exits cleanly", () => {
           history: [],
         },
       },
-      updateCalls: [],
+      setCalls: [],
     };
-    const db = fakeDb(dbState);
+    const firestore = fakeFirestore(state);
 
     const events: Array<{ type: string; pendingResumeSuffix?: string }> = [];
     for await (const ev of runMeta(
       { campaignId: CAMPAIGN, userId: USER, playerMessage: "/resume" },
-      { db, runMetaDirectorFn: stubMetaDirector },
+      { firestore, runMetaDirectorFn: stubMetaDirector },
     )) {
       events.push(ev as { type: string; pendingResumeSuffix?: string });
     }
@@ -211,18 +216,18 @@ describe("runMeta — /resume exits cleanly", () => {
     expect(events[0]?.pendingResumeSuffix).toBeUndefined();
 
     // State cleared: meta_conversation dropped from settings.
-    const patch = dbState.updateCalls[0]?.patch as { settings: Record<string, unknown> };
+    const patch = state.setCalls[0] as { settings: Record<string, unknown> };
     expect(patch.settings.meta_conversation).toBeUndefined();
   });
 
   it("emits exited with pendingResumeSuffix when /resume has a payload", async () => {
-    const dbState: FakeDbState = {
+    const state: FakeFsState = {
       settings: {
         meta_conversation: { active: true, started_at_turn: 5, history: [] },
       },
-      updateCalls: [],
+      setCalls: [],
     };
-    const db = fakeDb(dbState);
+    const firestore = fakeFirestore(state);
 
     const events: Array<{ type: string; pendingResumeSuffix?: string }> = [];
     for await (const ev of runMeta(
@@ -231,7 +236,7 @@ describe("runMeta — /resume exits cleanly", () => {
         userId: USER,
         playerMessage: "/resume I turn to Jet",
       },
-      { db, runMetaDirectorFn: stubMetaDirector },
+      { firestore, runMetaDirectorFn: stubMetaDirector },
     )) {
       events.push(ev as { type: string; pendingResumeSuffix?: string });
     }
@@ -242,25 +247,25 @@ describe("runMeta — /resume exits cleanly", () => {
 describe("runMeta — /play, /back, /exit all exit without piping", () => {
   for (const cmd of ["/play", "/back", "/exit"] as const) {
     it(`clears state on ${cmd}`, async () => {
-      const dbState: FakeDbState = {
+      const state: FakeFsState = {
         settings: {
           meta_conversation: { active: true, started_at_turn: 5, history: [] },
         },
-        updateCalls: [],
+        setCalls: [],
       };
-      const db = fakeDb(dbState);
+      const firestore = fakeFirestore(state);
 
       let exitedEvent: { type: string; pendingResumeSuffix?: string } | undefined;
       for await (const ev of runMeta(
         { campaignId: CAMPAIGN, userId: USER, playerMessage: cmd },
-        { db, runMetaDirectorFn: stubMetaDirector },
+        { firestore, runMetaDirectorFn: stubMetaDirector },
       )) {
         if (ev.type === "exited")
           exitedEvent = ev as { type: string; pendingResumeSuffix?: string };
       }
       expect(exitedEvent?.type).toBe("exited");
       expect(exitedEvent?.pendingResumeSuffix).toBeUndefined();
-      const patch = dbState.updateCalls[0]?.patch as { settings: Record<string, unknown> };
+      const patch = state.setCalls[0] as { settings: Record<string, unknown> };
       expect(patch.settings.meta_conversation).toBeUndefined();
     });
   }
@@ -268,8 +273,8 @@ describe("runMeta — /play, /back, /exit all exit without piping", () => {
 
 describe("runMeta — suggested_override surfaces when director proposes one", () => {
   it("emits suggested_override event with category + value", async () => {
-    const dbState: FakeDbState = { settings: {}, updateCalls: [] };
-    const db = fakeDb(dbState);
+    const state: FakeFsState = { settings: {}, setCalls: [] };
+    const firestore = fakeFirestore(state);
     const directorWithOverride = (async () => ({
       response: "Got it — I'll lock that in.",
       suggested_override: {
@@ -285,7 +290,7 @@ describe("runMeta — suggested_override surfaces when director proposes one", (
         userId: USER,
         playerMessage: "/meta no graphic violence please",
       },
-      { db, runMetaDirectorFn: directorWithOverride },
+      { firestore, runMetaDirectorFn: directorWithOverride },
     )) {
       events.push(ev as never);
     }

@@ -1,12 +1,11 @@
 import { runMetaDirector } from "@/lib/agents/meta-director";
 import type { AgentLogger } from "@/lib/agents/types";
 import { defaultLogger } from "@/lib/agents/types";
-import type { Db } from "@/lib/db";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { anthropicFallbackConfig } from "@/lib/providers";
-import { campaigns } from "@/lib/state/schema";
 import type { AidmSpanHandle } from "@/lib/tools";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import type { Firestore } from "firebase-admin/firestore";
 import { resolveModelContext } from "./turn";
 
 /**
@@ -24,11 +23,11 @@ import { resolveModelContext } from "./turn";
  *   - `/play`/`/back`/`/exit` → exit state, no further action
  *   - (non-command while active) → continue the dialectic
  *
- * Meta turns do NOT persist to the `turns` table — the `turns` table is
- * reserved for gameplay exchanges. Meta history lives on
- * `campaigns.settings.meta_conversation.history`; this keeps
- * nextTurnNumber computation clean (max(turn_number) from turns table
- * ignores meta-loop noise).
+ * Meta turns do NOT persist to the `turns` collection — turns/{turnId}
+ * is reserved for gameplay exchanges. Meta history lives on
+ * `campaigns/{id}.settings.meta_conversation.history`; this keeps
+ * nextTurnNumber computation clean (max(turn_number) over turns
+ * subcollection ignores meta-loop noise).
  *
  * Chronicler does NOT fire on meta turns. The meta loop is authorship-
  * calibration; nothing to catalog.
@@ -49,7 +48,7 @@ export interface MetaWorkflowInput {
 }
 
 export interface MetaWorkflowDeps {
-  db: Db;
+  firestore: Firestore;
   trace?: AidmSpanHandle;
   logger?: AgentLogger;
   /** Inject mock MetaDirector in tests. */
@@ -93,7 +92,7 @@ export function shouldDispatchMeta(
 }
 
 async function loadMetaState(
-  db: Db,
+  firestore: Firestore,
   campaignId: string,
   userId: string,
 ): Promise<{
@@ -101,36 +100,36 @@ async function loadMetaState(
   meta: NonNullable<CampaignSettings["meta_conversation"]> | null;
   lastGameplayTurn: number;
 }> {
-  const [row] = await db
-    .select({ settings: campaigns.settings })
-    .from(campaigns)
-    .where(
-      and(eq(campaigns.id, campaignId), eq(campaigns.userId, userId), isNull(campaigns.deletedAt)),
-    )
-    .limit(1);
-  if (!row) throw new Error("Campaign not found");
-  const parsed = CampaignSettings.safeParse(row.settings ?? {});
-  const settings = (row.settings ?? {}) as Record<string, unknown>;
+  const snap = await firestore.collection(COL.campaigns).doc(campaignId).get();
+  if (!snap.exists) throw new Error("Campaign not found");
+  const data = snap.data();
+  if (!data || data.ownerUid !== userId || data.deletedAt !== null) {
+    throw new Error("Campaign not found");
+  }
+  const rawSettings = (data.settings ?? {}) as Record<string, unknown>;
+  const parsed = CampaignSettings.safeParse(rawSettings);
   const meta = parsed.success ? (parsed.data.meta_conversation ?? null) : null;
 
   // nextGameplayTurn is informational — caller uses it when setting
-  // `started_at_turn` on entry.
-  const { turns } = await import("@/lib/state/schema");
-  const [latest] = await db
-    .select({ turnNumber: turns.turnNumber })
-    .from(turns)
-    .where(eq(turns.campaignId, campaignId))
-    .orderBy(desc(turns.turnNumber))
-    .limit(1);
-  const lastGameplayTurn = latest?.turnNumber ?? 0;
+  // `started_at_turn` on entry. Pull the highest turnNumber from the
+  // turns subcollection.
+  const latestSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.turns)
+    .orderBy("turnNumber", "desc")
+    .limit(1)
+    .get();
+  const latestRow = latestSnap.docs[0]?.data();
+  const lastGameplayTurn =
+    typeof latestRow?.turnNumber === "number" ? latestRow.turnNumber : 0;
 
-  return { settings, meta, lastGameplayTurn };
+  return { settings: rawSettings, meta, lastGameplayTurn };
 }
 
 async function writeMetaState(
-  db: Db,
+  firestore: Firestore,
   campaignId: string,
-  userId: string,
   settings: Record<string, unknown>,
   meta: NonNullable<CampaignSettings["meta_conversation"]> | null,
 ): Promise<void> {
@@ -143,10 +142,10 @@ async function writeMetaState(
     newSettings = { ...settings };
     Reflect.deleteProperty(newSettings, "meta_conversation");
   }
-  await db
-    .update(campaigns)
-    .set({ settings: newSettings })
-    .where(and(eq(campaigns.id, campaignId), eq(campaigns.userId, userId)));
+  await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .set({ settings: newSettings }, { merge: true });
 }
 
 /**
@@ -158,17 +157,17 @@ export async function* runMeta(
   deps: MetaWorkflowDeps,
 ): AsyncGenerator<MetaEventType, void, void> {
   const logger = deps.logger ?? defaultLogger;
-  const db = deps.db;
+  const firestore = deps.firestore;
   const metaDirectorFn = deps.runMetaDirectorFn ?? runMetaDirector;
   const { command, payload } = classifyMetaMessage(input.playerMessage);
   const logContext = { campaignId: input.campaignId, userId: input.userId };
 
   try {
-    const state = await loadMetaState(db, input.campaignId, input.userId);
+    const state = await loadMetaState(firestore, input.campaignId, input.userId);
 
     // --- Exit-command short-circuit (/play, /back, /exit, /resume) ---
     if (command === "play" || command === "back" || command === "exit") {
-      await writeMetaState(db, input.campaignId, input.userId, state.settings, null);
+      await writeMetaState(firestore, input.campaignId, state.settings, null);
       yield {
         type: "exited",
         pendingResumeSuffix: undefined,
@@ -177,7 +176,7 @@ export async function* runMeta(
     }
     if (command === "resume") {
       const suffix = payload.length > 0 ? payload : undefined;
-      await writeMetaState(db, input.campaignId, input.userId, state.settings, null);
+      await writeMetaState(firestore, input.campaignId, state.settings, null);
       yield { type: "exited", pendingResumeSuffix: suffix };
       return;
     }
@@ -240,7 +239,7 @@ export async function* runMeta(
       ],
       pending_resume_suffix: state.meta?.pending_resume_suffix,
     };
-    await writeMetaState(db, input.campaignId, input.userId, state.settings, newMeta);
+    await writeMetaState(firestore, input.campaignId, state.settings, newMeta);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger("error", "runMeta: failed", {

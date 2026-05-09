@@ -1,6 +1,5 @@
-import type { Db } from "@/lib/db";
 import type { IntentOutput } from "@/lib/types/turn";
-import { type Table, getTableName } from "drizzle-orm";
+import type { Firestore } from "firebase-admin/firestore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -16,8 +15,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * structured-runner providers to get a deterministic verdict shape.
  *
  * `invokeTool` is mocked at the module level so WB-ACCEPT tests can
- * assert which tools fired + with what inputs, without requiring real DB
- * round-trips through the tool registry.
+ * assert which tools fired + with what inputs, without requiring real
+ * Firestore round-trips through the tool registry.
  */
 
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -132,112 +131,149 @@ const MIN_PROFILE = {
 };
 
 // ---------------------------------------------------------------------------
-// Fake Db with write tracking.
+// Fake Firestore with write tracking. Maintains a campaign settings
+// reference so writes visibly mutate the next read (used by the
+// "next turn reads back override" test).
 // ---------------------------------------------------------------------------
-interface DbTrace {
-  insertValues: Array<{ table: string; values: unknown }>;
-  updateCalls: Array<{ table: string; patch: unknown }>;
-  selectTable: string[];
-  executeCalls: number;
+
+interface FsTrace {
+  /** Captured `add` payloads on the turns subcollection. */
+  turnAdds: Array<Record<string, unknown>>;
+  /** Captured `set` payloads on the campaign doc (settings + locks). */
+  campaignSets: Array<Record<string, unknown>>;
 }
 
-function fakeDb(trace: DbTrace): Db {
-  const nameOf = (t: unknown): string => {
-    try {
-      return getTableName(t as Table);
-    } catch {
-      return "unknown";
-    }
-  };
-  return {
-    execute: async () => {
-      trace.executeCalls += 1;
-      // pg_try_advisory_lock → locked: true so the workflow proceeds.
-      return { rows: [{ locked: true }] };
+interface FsState {
+  /** Mutable settings — writes that include `settings` mutate this so
+   * subsequent reads in the same test see the persisted state. */
+  campaignSettings: Record<string, unknown>;
+}
+
+function fakeFirestore(trace: FsTrace, state: FsState): Firestore {
+  const turnsCol = {
+    add: async (data: Record<string, unknown>) => {
+      trace.turnAdds.push(data);
+      return { id: "turn-row-id" };
     },
-    select: (_cols?: unknown) => ({
-      from: (table: unknown) => {
-        const name = nameOf(table);
-        trace.selectTable.push(name);
-        return {
-          where: (_w?: unknown) => ({
-            limit: async () => {
-              if (name === "campaigns") {
-                return [
-                  {
-                    id: CAMPAIGN_ID,
-                    userId: USER_ID,
-                    name: "Test Campaign",
-                    phase: "playing",
-                    profileRefs: [PROFILE_SLUG],
-                    settings: { overrides: [] },
-                    deletedAt: null,
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              if (name === "profiles") {
-                return [
-                  {
-                    id: "p1",
-                    slug: PROFILE_SLUG,
-                    title: "Cowboy Bebop",
-                    mediaType: "anime",
-                    content: MIN_PROFILE,
-                    version: 1,
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              if (name === "characters") {
-                return [
-                  {
-                    id: "c1",
-                    campaignId: CAMPAIGN_ID,
-                    name: "Spike",
-                    concept: "ex-syndicate bounty hunter",
-                    powerTier: "T7",
-                    sheet: {},
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              return [];
-            },
-            orderBy: (_o?: unknown) => ({
-              limit: async () => [], // working-memory query
-            }),
-          }),
-        };
-      },
+    orderBy: () => ({
+      limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
     }),
-    insert: (table: unknown) => {
-      const name = nameOf(table);
-      return {
-        values: (values: unknown) => {
-          trace.insertValues.push({ table: name, values });
-          return {
-            returning: async () => [{ id: `${name}-row-id` }],
-          };
+    where: () => ({
+      orderBy: () => ({
+        limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+      }),
+      limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+    }),
+  };
+  const charactersCol = {
+    limit: () => ({
+      get: async () => ({
+        empty: false,
+        docs: [
+          {
+            id: "c1",
+            data: () => ({
+              campaignId: CAMPAIGN_ID,
+              name: "Spike",
+              concept: "ex-syndicate bounty hunter",
+              powerTier: "T7",
+              sheet: {},
+              createdAt: new Date(),
+            }),
+          },
+        ],
+      }),
+    }),
+  };
+  // Chainable empty-query stub — every method returns the same object,
+  // every `.get()` resolves to an empty snap. Removes need to handcraft
+  // each query shape (where→orderBy→limit, limit→get, etc.).
+  const emptySnap = async () => ({ empty: true, docs: [] });
+  const emptyQuery: Record<string, unknown> = {};
+  emptyQuery.where = () => emptyQuery;
+  emptyQuery.orderBy = () => emptyQuery;
+  emptyQuery.limit = () => emptyQuery;
+  emptyQuery.get = emptySnap;
+  const npcsCol = emptyQuery;
+  const subcolEmpty = emptyQuery;
+
+  const campaignDocRef = {
+    get: async () => ({
+      exists: true,
+      data: () => ({
+        ownerUid: USER_ID,
+        deletedAt: null,
+        name: "Test Campaign",
+        phase: "playing",
+        profileRefs: [PROFILE_SLUG],
+        settings: state.campaignSettings,
+      }),
+    }),
+    set: async (data: Record<string, unknown>, _opts?: { merge?: boolean }) => {
+      trace.campaignSets.push(data);
+      // Persist settings so subsequent reads see the mutation.
+      const incoming = data.settings;
+      if (incoming && typeof incoming === "object") {
+        state.campaignSettings = incoming as Record<string, unknown>;
+      }
+    },
+    collection: (name: string) => {
+      if (name === "turns") return turnsCol;
+      if (name === "characters") return charactersCol;
+      if (name === "npcs") return npcsCol;
+      return subcolEmpty;
+    },
+  };
+
+  const profilesCol = {
+    where: () => ({
+      limit: () => ({
+        get: async () => ({
+          empty: false,
+          docs: [
+            {
+              id: "p1",
+              data: () => ({
+                slug: PROFILE_SLUG,
+                title: "Cowboy Bebop",
+                mediaType: "anime",
+                content: MIN_PROFILE,
+                version: 1,
+                createdAt: new Date(),
+              }),
+            },
+          ],
+        }),
+      }),
+    }),
+  };
+
+  return {
+    collection: (name: string) => {
+      if (name === "campaigns") return { doc: () => campaignDocRef };
+      if (name === "profiles") return profilesCol;
+      if (name === "ruleLibraryChunks") return emptyQuery;
+      throw new Error(`unexpected collection ${name}`);
+    },
+    runTransaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+      const tx = {
+        get: async (ref: unknown) => {
+          if (ref === campaignDocRef) return campaignDocRef.get();
+          throw new Error("unexpected tx.get");
+        },
+        set: (ref: unknown, data: Record<string, unknown>) => {
+          if (ref === campaignDocRef) {
+            trace.campaignSets.push(data);
+          }
         },
       };
+      return fn(tx);
     },
-    update: (table: unknown) => {
-      const name = nameOf(table);
-      return {
-        set: (patch: unknown) => {
-          trace.updateCalls.push({ table: name, patch });
-          return {
-            where: async () => ({ rowCount: 1 }),
-          };
-        },
-      };
-    },
-  } as unknown as Db;
+  } as unknown as Firestore;
 }
 
-function makeTrace(): DbTrace {
-  return { insertValues: [], updateCalls: [], selectTable: [], executeCalls: 0 };
+function makeTrace(): FsTrace {
+  return { turnAdds: [], campaignSets: [] };
 }
 
 function makeIntent(overrides: Partial<IntentOutput> = {}): IntentOutput {
@@ -258,7 +294,8 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
   it("appends a new override entry to campaign.settings.overrides on ACK", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: { overrides: [] } };
+    const firestore = fakeFirestore(trace, state);
     const { runTurn } = await import("../turn");
 
     const routeFn = (async () => ({
@@ -276,7 +313,7 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
     const iter = runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "/override Jet cannot die" },
-      { db, routeFn },
+      { firestore, routeFn },
     );
     const events: string[] = [];
     for await (const ev of iter) {
@@ -285,10 +322,12 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
     expect(events).toContain("routed");
     expect(events).toContain("done");
 
-    // campaigns.update fired with the new override appended.
-    const campaignUpdates = trace.updateCalls.filter((u) => u.table === "campaigns");
-    expect(campaignUpdates).toHaveLength(1);
-    const patch = campaignUpdates[0]?.patch as { settings: { overrides: unknown[] } };
+    // campaign settings update fired with the new override appended.
+    const settingsUpdates = trace.campaignSets.filter(
+      (p) => Object.hasOwn(p, "settings") && !Object.hasOwn(p, "turnInFlight"),
+    );
+    expect(settingsUpdates).toHaveLength(1);
+    const patch = settingsUpdates[0] as { settings: { overrides: unknown[] } };
     expect(patch.settings.overrides).toHaveLength(1);
     const [newOverride] = patch.settings.overrides as Array<{
       id: string;
@@ -305,8 +344,6 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
   it("preserves existing overrides and appends new (not clobber)", async () => {
     const trace = makeTrace();
-    // Override the fake to return a campaign that already has one override.
-    const base = fakeDb(trace);
     const existingOverride = {
       id: "pre-existing",
       category: "TONE_REQUIREMENT",
@@ -314,43 +351,8 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
       scope: "campaign",
       created_at: "2026-04-20T00:00:00Z",
     };
-    const db: Db = {
-      ...base,
-      select: (cols?: unknown) => {
-        const inner = (base as unknown as { select: (c?: unknown) => unknown }).select(cols) as {
-          from: (t: unknown) => {
-            where: (w?: unknown) => {
-              limit: () => Promise<unknown[]>;
-              orderBy: (o?: unknown) => unknown;
-            };
-          };
-        };
-        return {
-          from: (t: unknown) => ({
-            where: (w?: unknown) => {
-              const inner2 = inner.from(t).where(w);
-              return {
-                limit: async () => {
-                  const rows = await inner2.limit();
-                  // Inject existing overrides on the campaign row.
-                  if (Array.isArray(rows) && rows.length > 0 && "settings" in (rows[0] as object)) {
-                    const row = rows[0] as { settings: { overrides: unknown[] } };
-                    if (
-                      Array.isArray(row.settings?.overrides) &&
-                      row.settings.overrides.length === 0
-                    ) {
-                      return [{ ...row, settings: { overrides: [existingOverride] } }];
-                    }
-                  }
-                  return rows;
-                },
-                orderBy: inner2.orderBy,
-              };
-            },
-          }),
-        };
-      },
-    } as unknown as Db;
+    const state: FsState = { campaignSettings: { overrides: [existingOverride] } };
+    const firestore = fakeFirestore(trace, state);
 
     const { runTurn } = await import("../turn");
 
@@ -373,15 +375,17 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
         userId: USER_ID,
         playerMessage: "/override No combat this session",
       },
-      { db, routeFn },
+      { firestore, routeFn },
     );
     for await (const _ of iter) {
       /* drain */
     }
 
-    const campaignUpdates = trace.updateCalls.filter((u) => u.table === "campaigns");
-    expect(campaignUpdates).toHaveLength(1);
-    const patch = campaignUpdates[0]?.patch as { settings: { overrides: unknown[] } };
+    const settingsUpdates = trace.campaignSets.filter(
+      (p) => Object.hasOwn(p, "settings") && !Object.hasOwn(p, "turnInFlight"),
+    );
+    expect(settingsUpdates).toHaveLength(1);
+    const patch = settingsUpdates[0] as { settings: { overrides: unknown[] } };
     expect(patch.settings.overrides).toHaveLength(2);
     const ids = (patch.settings.overrides as Array<{ id: string }>).map((o) => o.id);
     expect(ids).toContain("pre-existing");
@@ -389,64 +393,8 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
   it("next turn's router reads the persisted override back via priorOverrides (v3-parity plan §1.1)", async () => {
     const trace = makeTrace();
-    // Shared campaign state across two turns — settings mutates via the
-    // override persist path, next turn loads it back.
-    const base = fakeDb(trace);
-    let sharedSettings: { overrides: unknown[] } = { overrides: [] };
-    const db: Db = {
-      ...base,
-      select: (cols?: unknown) => {
-        const inner = (base as unknown as { select: (c?: unknown) => unknown }).select(cols) as {
-          from: (t: unknown) => {
-            where: (w?: unknown) => {
-              limit: () => Promise<unknown[]>;
-              orderBy: (o?: unknown) => unknown;
-            };
-          };
-        };
-        return {
-          from: (t: unknown) => ({
-            where: (w?: unknown) => {
-              const inner2 = inner.from(t).where(w);
-              return {
-                limit: async () => {
-                  const rows = await inner2.limit();
-                  // Inject the live sharedSettings onto the campaign row each select.
-                  if (Array.isArray(rows) && rows.length > 0 && "settings" in (rows[0] as object)) {
-                    const row = rows[0] as { settings: unknown };
-                    return [{ ...row, settings: sharedSettings }];
-                  }
-                  return rows;
-                },
-                orderBy: inner2.orderBy,
-              };
-            },
-          }),
-        };
-      },
-      update: (table: unknown) => {
-        const name = (() => {
-          try {
-            return getTableName(table as Table);
-          } catch {
-            return "unknown";
-          }
-        })();
-        return {
-          set: (patch: unknown) => {
-            trace.updateCalls.push({ table: name, patch });
-            // Mutate the shared settings reference so the NEXT select
-            // sees the persisted override.
-            if (name === "campaigns") {
-              const p = patch as { settings?: { overrides?: unknown[] } };
-              if (p.settings) sharedSettings = p.settings as { overrides: unknown[] };
-            }
-            return { where: async () => ({ rowCount: 1 }) };
-          },
-        };
-      },
-    } as unknown as Db;
-
+    const state: FsState = { campaignSettings: { overrides: [] } };
+    const firestore = fakeFirestore(trace, state);
     const { runTurn } = await import("../turn");
 
     const firstRouteFn = (async () => ({
@@ -464,7 +412,7 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
     for await (const _ of runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "/override no violence" },
-      { db, routeFn: firstRouteFn },
+      { firestore, routeFn: firstRouteFn },
     )) {
       /* drain */
     }
@@ -494,7 +442,7 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
     for await (const _ of runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "continue" },
-      { db, routeFn: secondRouteFn, runKa: mockRunKa },
+      { firestore, routeFn: secondRouteFn, runKa: mockRunKa },
     )) {
       /* drain */
     }
@@ -509,7 +457,8 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
   it("does not persist when override mode is 'meta' (meta conversation Phase 5)", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const { runTurn } = await import("../turn");
 
     const routeFn = (async () => ({
@@ -527,14 +476,16 @@ describe("runTurn — /override persistence (Phase 1, v3-audit closure)", () => 
 
     const iter = runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "/meta less swearing" },
-      { db, routeFn },
+      { firestore, routeFn },
     );
     for await (const _ of iter) {
       /* drain */
     }
-    // No campaign update for meta-mode overrides at Phase 1.
-    const campaignUpdates = trace.updateCalls.filter((u) => u.table === "campaigns");
-    expect(campaignUpdates).toHaveLength(0);
+    // No settings update for meta-mode overrides at Phase 1.
+    const settingsUpdates = trace.campaignSets.filter(
+      (p) => Object.hasOwn(p, "settings") && !Object.hasOwn(p, "turnInFlight"),
+    );
+    expect(settingsUpdates).toHaveLength(0);
   });
 });
 
@@ -561,7 +512,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("invokes register_npc for npc entityUpdates (now on continue path)", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const tools = await import("@/lib/tools");
     const invokeSpy = tools.invokeTool as unknown as ReturnType<typeof vi.fn>;
     invokeSpy.mockClear();
@@ -592,7 +544,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
         userId: USER_ID,
         playerMessage: "Jet is a retired ISSP major",
       },
-      { db, routeFn, runKa: makeMockRunKa() },
+      { firestore, routeFn, runKa: makeMockRunKa() },
     );
     for await (const _ of iter) {
       /* drain */
@@ -610,7 +562,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("invokes register_location for location entityUpdates", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const tools = await import("@/lib/tools");
     const invokeSpy = tools.invokeTool as unknown as ReturnType<typeof vi.fn>;
     invokeSpy.mockClear();
@@ -641,7 +594,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
         userId: USER_ID,
         playerMessage: "I dock at Tharsis 17",
       },
-      { db, routeFn, runKa: makeMockRunKa() },
+      { firestore, routeFn, runKa: makeMockRunKa() },
     );
     for await (const _ of iter) {
       /* drain */
@@ -659,7 +612,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("invokes write_semantic_memory with heat 80 for player-asserted facts", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const tools = await import("@/lib/tools");
     const invokeSpy = tools.invokeTool as unknown as ReturnType<typeof vi.fn>;
     invokeSpy.mockClear();
@@ -690,7 +644,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
         userId: USER_ID,
         playerMessage: "Spike owes Vicious money",
       },
-      { db, routeFn, runKa: makeMockRunKa() },
+      { firestore, routeFn, runKa: makeMockRunKa() },
     );
     for await (const _ of iter) {
       /* drain */
@@ -709,7 +663,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("does NOT invoke any tools on WB CLARIFY (short-circuits, no KA, no persistence)", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const tools = await import("@/lib/tools");
     const invokeSpy = tools.invokeTool as unknown as ReturnType<typeof vi.fn>;
     invokeSpy.mockClear();
@@ -731,7 +686,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
     const iter = runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "I pull out my amulet" },
-      { db, routeFn },
+      { firestore, routeFn },
     );
     for await (const _ of iter) {
       /* drain */
@@ -742,7 +697,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("continues processing remaining updates when one fails", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const tools = await import("@/lib/tools");
     const invokeSpy = tools.invokeTool as unknown as ReturnType<typeof vi.fn>;
     invokeSpy.mockClear();
@@ -772,7 +728,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
     const iter = runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "assert much" },
-      { db, routeFn, runKa: makeMockRunKa() },
+      { firestore, routeFn, runKa: makeMockRunKa() },
     );
     for await (const _ of iter) {
       /* drain */
@@ -784,7 +740,8 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
   it("emits WB flags on the done event (WB reshape)", async () => {
     const trace = makeTrace();
-    const db = fakeDb(trace);
+    const state: FsState = { campaignSettings: {} };
+    const firestore = fakeFirestore(trace, state);
     const { runTurn } = await import("../turn");
 
     const routeFn = (async () => ({
@@ -807,7 +764,7 @@ describe("runTurn — WB ACCEPT entity persistence (WB reshape: continues throug
 
     const iter = runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "galactic empire…" },
-      { db, routeFn, runKa: makeMockRunKa() },
+      { firestore, routeFn, runKa: makeMockRunKa() },
     );
     const events: Array<{ type: string; flags?: unknown[] }> = [];
     for await (const ev of iter) events.push(ev as { type: string; flags?: unknown[] });

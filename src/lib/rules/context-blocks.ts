@@ -1,6 +1,5 @@
-import type { Db } from "@/lib/db";
-import { contextBlocks } from "@/lib/state/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import type { Firestore } from "firebase-admin/firestore";
 
 /**
  * Read-path helper for context_blocks (Phase 3C of v3-audit closure).
@@ -31,31 +30,51 @@ const PER_TYPE_CAP = 3;
  * and amortizes across turns within a session. */
 const MAX_TOTAL = 10;
 
-export async function assembleSessionContextBlocks(db: Db, campaignId: string): Promise<string> {
-  // Pull ALL active blocks — no DB-level alphabetical order or early limit
-  // (those were the Phase 3 audit MINORs: alphabetical != canonical; early
-  // limit starves NPCs). In-memory sort + per-type cap is the only way to
-  // preserve the canonical briefing order + prevent one category from
-  // eating the budget.
-  const rows = await db
-    .select({
-      blockType: contextBlocks.blockType,
-      entityName: contextBlocks.entityName,
-      content: contextBlocks.content,
-      continuityChecklist: contextBlocks.continuityChecklist,
-      lastUpdatedTurn: contextBlocks.lastUpdatedTurn,
-    })
-    .from(contextBlocks)
-    .where(and(eq(contextBlocks.campaignId, campaignId), eq(contextBlocks.status, "active")))
-    .orderBy(desc(contextBlocks.lastUpdatedTurn))
-    .limit(500);
+interface ContextBlockRow {
+  blockType: string;
+  entityName: string;
+  content: string;
+  continuityChecklist: Record<string, unknown>;
+  lastUpdatedTurn: number;
+}
 
-  if (rows.length === 0) return "";
+export async function assembleSessionContextBlocks(
+  firestore: Firestore,
+  campaignId: string,
+): Promise<string> {
+  // Pull ALL active blocks — no DB-level alphabetical order (alphabetical
+  // != canonical) and no early limit (it would starve NPCs). In-memory
+  // sort + per-type cap is the only way to preserve canonical briefing
+  // order + prevent one category from eating the budget.
+  const snap = await firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.contextBlocks)
+    .where("status", "==", "active")
+    .orderBy("lastUpdatedTurn", "desc")
+    .limit(500)
+    .get();
+
+  if (snap.empty) return "";
+
+  const rows: ContextBlockRow[] = snap.docs.map((d) => {
+    const r = d.data();
+    return {
+      blockType: typeof r.blockType === "string" ? r.blockType : "",
+      entityName: typeof r.entityName === "string" ? r.entityName : "",
+      content: typeof r.content === "string" ? r.content : "",
+      continuityChecklist:
+        typeof r.continuityChecklist === "object" && r.continuityChecklist !== null
+          ? (r.continuityChecklist as Record<string, unknown>)
+          : {},
+      lastUpdatedTurn: typeof r.lastUpdatedTurn === "number" ? r.lastUpdatedTurn : 0,
+    };
+  });
 
   // Bucket by block_type and keep the PER_TYPE_CAP most-recently-updated
-  // within each bucket (rows are already last-updated-desc from the DB
+  // within each bucket (rows are already last-updated-desc from the
   // query).
-  const byType = new Map<string, typeof rows>();
+  const byType = new Map<string, ContextBlockRow[]>();
   for (const row of rows) {
     const list = byType.get(row.blockType) ?? [];
     if (list.length < PER_TYPE_CAP) list.push(row);
@@ -63,7 +82,7 @@ export async function assembleSessionContextBlocks(db: Db, campaignId: string): 
   }
 
   // Materialize in canonical order up to MAX_TOTAL.
-  const capped: typeof rows = [];
+  const capped: ContextBlockRow[] = [];
   for (const blockType of BLOCK_TYPE_ORDER) {
     const list = byType.get(blockType);
     if (!list) continue;
@@ -76,7 +95,7 @@ export async function assembleSessionContextBlocks(db: Db, campaignId: string): 
 
   // Group for rendering (preserves canonical order because we iterated
   // over BLOCK_TYPE_ORDER above).
-  const grouped = new Map<string, typeof capped>();
+  const grouped = new Map<string, ContextBlockRow[]>();
   for (const row of capped) {
     const list = grouped.get(row.blockType) ?? [];
     list.push(row);
@@ -90,7 +109,7 @@ export async function assembleSessionContextBlocks(db: Db, campaignId: string): 
     const heading = sectionHeading(blockType);
     const body = list
       .map((b) => {
-        const checklist = formatChecklist(b.continuityChecklist as Record<string, unknown>);
+        const checklist = formatChecklist(b.continuityChecklist);
         return `#### ${b.entityName}\n\n${b.content.trim()}${checklist ? `\n\n${checklist}` : ""}`;
       })
       .join("\n\n");

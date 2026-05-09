@@ -1,8 +1,7 @@
 import { getCurrentUser } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
 import { ensureUserSeeded } from "@/lib/seed/ensure-seeded";
-import { campaigns } from "@/lib/state/schema";
-import { and, desc, eq, isNull } from "drizzle-orm";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -14,7 +13,7 @@ export default async function CampaignsPage() {
   if (!user) redirect("/sign-in");
 
   // Backfill users-row + Bebop campaign for accounts that slipped past
-  // the Clerk webhook. Idempotent — fresh webhook-seeded users no-op
+  // the auth-side seed. Idempotent — fresh sign-in seeded users no-op
   // through here. See src/lib/seed/ensure-seeded.ts for rationale.
   try {
     await ensureUserSeeded(user);
@@ -25,11 +24,26 @@ export default async function CampaignsPage() {
     });
   }
 
-  const rows = await getDb()
-    .select({ id: campaigns.id, name: campaigns.name, phase: campaigns.phase })
-    .from(campaigns)
-    .where(and(eq(campaigns.userId, user.id), isNull(campaigns.deletedAt)))
-    .orderBy(desc(campaigns.createdAt));
+  // Firestore can't combine `==` and `is null` filters cleanly without an
+  // index that explicitly stores the null. The `deletedAt == null`
+  // ordering is required by ensureUserSeeded which writes the field
+  // explicitly. Composite index needs (ownerUid asc, deletedAt asc,
+  // createdAt desc) for this query — declared in firestore.indexes.json
+  // (or auto-suggested by the console on first run).
+  const snap = await getFirebaseFirestore()
+    .collection(COL.campaigns)
+    .where("ownerUid", "==", user.id)
+    .where("deletedAt", "==", null)
+    .orderBy("createdAt", "desc")
+    .get();
+  const rows = snap.docs.map((d) => {
+    const r = d.data();
+    return {
+      id: d.id,
+      name: typeof r.name === "string" ? r.name : "",
+      phase: typeof r.phase === "string" ? r.phase : "sz",
+    };
+  });
 
   const greeting = user.email ?? user.id;
 

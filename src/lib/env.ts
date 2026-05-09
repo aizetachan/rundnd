@@ -3,10 +3,6 @@ import { z } from "zod";
 // Env schema grows commit-by-commit. Each integration adds its own fields.
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  // DATABASE_URL kept optional during the M0.5 Firebase migration — Postgres
-  // is being decommissioned commit-by-commit; some legacy modules still
-  // reference it until the data layer rewrite (Fase 3) lands.
-  DATABASE_URL: z.string().url().optional(),
   NEXT_PUBLIC_APP_URL: z.string().url().default("http://localhost:3000"),
 
   // --- Firebase (M0.5 migration) ---

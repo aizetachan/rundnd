@@ -12,45 +12,29 @@ describe("env Proxy", () => {
     process.env = originalEnv;
   });
 
-  it("reads a valid DATABASE_URL through property access", async () => {
-    process.env.DATABASE_URL = "postgres://user:pass@localhost:5432/db";
-    const { env } = await import("./env");
-    expect(env.DATABASE_URL).toBe("postgres://user:pass@localhost:5432/db");
-  });
-
-  it("leaves DATABASE_URL undefined when unset (optional during M0.5 Firebase migration)", async () => {
-    Reflect.deleteProperty(process.env, "DATABASE_URL");
-    const { env } = await import("./env");
-    expect(env.DATABASE_URL).toBeUndefined();
-  });
-
   it("applies default for NODE_ENV when unset", async () => {
-    process.env.DATABASE_URL = "postgres://u:p@h:5432/d";
     Reflect.deleteProperty(process.env, "NODE_ENV");
     const { env } = await import("./env");
     expect(env.NODE_ENV).toBe("development");
   });
 
   it("applies default for LANGFUSE_HOST", async () => {
-    process.env.DATABASE_URL = "postgres://u:p@h:5432/d";
     Reflect.deleteProperty(process.env, "LANGFUSE_HOST");
     const { env } = await import("./env");
     expect(env.LANGFUSE_HOST).toBe("https://us.cloud.langfuse.com");
   });
 
   it("leaves optional keys undefined when unset", async () => {
-    process.env.DATABASE_URL = "postgres://u:p@h:5432/d";
     Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
     const { env } = await import("./env");
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
   it("ownKeys works for spread/destructure", async () => {
-    process.env.DATABASE_URL = "postgres://u:p@h:5432/d";
     const { env } = await import("./env");
     const keys = Object.keys(env);
-    expect(keys).toContain("DATABASE_URL");
     expect(keys).toContain("NODE_ENV");
+    expect(keys).toContain("NEXT_PUBLIC_APP_URL");
   });
 });
 

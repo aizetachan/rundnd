@@ -6,12 +6,6 @@ function makeCtx(): AidmToolContext {
   return {
     campaignId: "c-1",
     userId: "u-1",
-    db: {
-      // Not exercised in these tests — we're verifying registration, not execution.
-      select: () => ({
-        from: () => ({ where: () => ({ limit: async () => [] }) }),
-      }),
-    } as unknown as AidmToolContext["db"],
   };
 }
 

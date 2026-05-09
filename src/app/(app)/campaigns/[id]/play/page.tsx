@@ -1,7 +1,6 @@
 import { getCurrentUser } from "@/lib/auth";
-import { getDb } from "@/lib/db";
-import { campaigns, turns } from "@/lib/state/schema";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { notFound, redirect } from "next/navigation";
 import PlayUI from "./play-ui";
 
@@ -17,24 +16,33 @@ export default async function PlayPage({ params }: PageProps) {
   if (!user) redirect("/sign-in");
 
   const { id } = await params;
-  const db = getDb();
+  const firestore = getFirebaseFirestore();
 
-  const [campaign] = await db
-    .select({ id: campaigns.id, name: campaigns.name, userId: campaigns.userId })
-    .from(campaigns)
-    .where(and(eq(campaigns.id, id), eq(campaigns.userId, user.id), isNull(campaigns.deletedAt)))
-    .limit(1);
-  if (!campaign) notFound();
+  const campaignSnap = await firestore.collection(COL.campaigns).doc(id).get();
+  if (!campaignSnap.exists) notFound();
+  const cd = campaignSnap.data();
+  if (!cd || cd.ownerUid !== user.id || cd.deletedAt !== null) notFound();
 
-  const priorTurns = await db
-    .select({
-      turn_number: turns.turnNumber,
-      player_message: turns.playerMessage,
-      narrative_text: turns.narrativeText,
-    })
-    .from(turns)
-    .where(eq(turns.campaignId, id))
-    .orderBy(asc(turns.turnNumber));
+  const turnsSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(id)
+    .collection(CAMPAIGN_SUB.turns)
+    .orderBy("turnNumber", "asc")
+    .get();
+  const priorTurns = turnsSnap.docs.map((d) => {
+    const r = d.data();
+    return {
+      turn_number: typeof r.turnNumber === "number" ? r.turnNumber : 0,
+      player_message: typeof r.playerMessage === "string" ? r.playerMessage : "",
+      narrative_text: typeof r.narrativeText === "string" ? r.narrativeText : "",
+    };
+  });
 
-  return <PlayUI campaignId={campaign.id} campaignName={campaign.name} priorTurns={priorTurns} />;
+  return (
+    <PlayUI
+      campaignId={campaignSnap.id}
+      campaignName={typeof cd.name === "string" ? cd.name : ""}
+      priorTurns={priorTurns}
+    />
+  );
 }

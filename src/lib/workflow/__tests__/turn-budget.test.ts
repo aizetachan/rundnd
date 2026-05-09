@@ -1,6 +1,5 @@
-import type { Db } from "@/lib/db";
 import type { IntentOutput } from "@/lib/types/turn";
-import { type Table, getTableName } from "drizzle-orm";
+import type { Firestore } from "firebase-admin/firestore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -113,85 +112,109 @@ const MIN_PROFILE = {
   director_personality: "noir-inflected, restrained, melancholic",
 };
 
-interface DbTrace {
-  insertValues: Array<{ table: string; values: unknown }>;
-  updateCalls: Array<{ table: string; patch: unknown }>;
+interface FsTrace {
+  /** Captured `add` payloads on the turns subcollection (insert-equivalent). */
+  turnAdds: Array<Record<string, unknown>>;
+  /** Captured `set` payloads on the campaign doc (settings updates + locks). */
+  campaignSets: Array<Record<string, unknown>>;
 }
 
-function fakeDb(trace: DbTrace): Db {
-  const nameOf = (t: unknown): string => getTableName(t as Table);
-  return {
-    execute: async () => ({ rows: [{ locked: true }] }),
-    select: (_fields?: unknown) => ({
-      from: (table: unknown) => {
-        const name = nameOf(table);
-        return {
-          where: () => ({
-            limit: async () => {
-              if (name === "campaigns") {
-                return [
-                  {
-                    id: CAMPAIGN_ID,
-                    userId: USER_ID,
-                    name: "Test Campaign",
-                    phase: "playing",
-                    profileRefs: [PROFILE_SLUG],
-                    settings: {},
-                    deletedAt: null,
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              if (name === "profiles") {
-                return [
-                  {
-                    id: "p1",
-                    slug: PROFILE_SLUG,
-                    title: "Cowboy Bebop",
-                    mediaType: "anime",
-                    content: MIN_PROFILE,
-                    version: 1,
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              if (name === "characters") {
-                return [
-                  {
-                    id: "c1",
-                    campaignId: CAMPAIGN_ID,
-                    name: "Spike",
-                    concept: "ex-syndicate bounty hunter",
-                    powerTier: "T7",
-                    sheet: {},
-                    createdAt: new Date(),
-                  },
-                ];
-              }
-              return [];
-            },
-            orderBy: () => ({
-              limit: async () => [],
-            }),
-          }),
-        };
-      },
+function fakeFirestore(trace: FsTrace): Firestore {
+  const turnsCol = {
+    add: async (data: Record<string, unknown>) => {
+      trace.turnAdds.push(data);
+      return { id: "turns-new-id" };
+    },
+    orderBy: () => ({
+      limit: () => ({
+        get: async () => ({ empty: true, docs: [] }),
+      }),
     }),
-    insert: (table: unknown) => {
-      const name = nameOf(table);
-      return {
-        values: (values: unknown) => {
-          trace.insertValues.push({ table: name, values });
-          return {
-            returning: async () => [{ id: `${name}-row-id` }],
-          };
+    where: () => ({
+      orderBy: () => ({
+        limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+      }),
+      limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+    }),
+  };
+  const emptySnap = async () => ({ empty: true, docs: [] });
+  const emptyQuery: Record<string, unknown> = {};
+  emptyQuery.where = () => emptyQuery;
+  emptyQuery.orderBy = () => emptyQuery;
+  emptyQuery.limit = () => emptyQuery;
+  emptyQuery.get = emptySnap;
+  const subcolEmpty = emptyQuery;
+  const campaignDocRef = {
+    get: async () => ({
+      exists: true,
+      data: () => ({
+        ownerUid: USER_ID,
+        deletedAt: null,
+        name: "Test Campaign",
+        phase: "playing",
+        profileRefs: [PROFILE_SLUG],
+        settings: {},
+      }),
+    }),
+    set: async (patch: Record<string, unknown>) => {
+      trace.campaignSets.push(patch);
+    },
+    collection: (name: string) => {
+      if (name === "turns") return turnsCol;
+      return subcolEmpty;
+    },
+  };
+  const profilesCol = {
+    where: () => ({
+      limit: () => ({
+        get: async () => ({
+          empty: false,
+          docs: [
+            {
+              id: "p1",
+              data: () => ({
+                slug: PROFILE_SLUG,
+                title: "Cowboy Bebop",
+                mediaType: "anime",
+                content: MIN_PROFILE,
+                version: 1,
+                createdAt: new Date(),
+              }),
+            },
+          ],
+        }),
+      }),
+    }),
+  };
+
+  return {
+    collection: (name: string) => {
+      if (name === "campaigns") return { doc: () => campaignDocRef };
+      if (name === "profiles") return profilesCol;
+      if (name === "ruleLibraryChunks") return emptyQuery;
+      throw new Error(`unexpected collection ${name}`);
+    },
+    runTransaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+      const tx = {
+        get: async (ref: unknown) => {
+          if (ref === campaignDocRef) return campaignDocRef.get();
+          throw new Error("unexpected tx.get");
+        },
+        set: (
+          ref: unknown,
+          data: Record<string, unknown>,
+          _opts?: { merge?: boolean },
+        ) => {
+          if (ref === campaignDocRef) {
+            trace.campaignSets.push(data);
+            return;
+          }
+          throw new Error("unexpected tx.set");
         },
       };
+      return fn(tx);
     },
-    update: () => ({
-      set: () => ({ where: async () => ({ rowCount: 1 }) }),
-    }),
-  } as unknown as Db;
+  } as unknown as Firestore;
 }
 
 function makeIntent(overrides: Partial<IntentOutput> = {}): IntentOutput {
@@ -211,8 +234,8 @@ describe("runTurn — cost aggregation (Commit 9)", () => {
   });
 
   it("persists costUsd as the sum of pre-pass recordCost + KA SDK cost", async () => {
-    const trace: DbTrace = { insertValues: [], updateCalls: [] };
-    const db = fakeDb(trace);
+    const trace: FsTrace = { turnAdds: [], campaignSets: [] };
+    const firestore = fakeFirestore(trace);
     const { runTurn } = await import("../turn");
 
     // Stub routeFn that emits cost via the recordCost dep, simulating
@@ -245,21 +268,20 @@ describe("runTurn — cost aggregation (Commit 9)", () => {
 
     for await (const _ of runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "look around" },
-      { db, routeFn, runKa: mockRunKa },
+      { firestore, routeFn, runKa: mockRunKa },
     )) {
       /* drain */
     }
 
-    const turnInsert = trace.insertValues.find((i) => i.table === "turns");
-    expect(turnInsert).toBeDefined();
-    const values = turnInsert?.values as { costUsd: string };
+    expect(trace.turnAdds).toHaveLength(1);
+    const values = trace.turnAdds[0] as { costUsd: number };
     // 0.001 + 0.002 + 0.0005 + 0.05 = 0.0535
-    expect(values.costUsd).toBe("0.053500");
+    expect(values.costUsd).toBeCloseTo(0.0535, 6);
   });
 
   it("persists KA cost alone when pre-pass emits no recordCost calls", async () => {
-    const trace: DbTrace = { insertValues: [], updateCalls: [] };
-    const db = fakeDb(trace);
+    const trace: FsTrace = { turnAdds: [], campaignSets: [] };
+    const firestore = fakeFirestore(trace);
     const { runTurn } = await import("../turn");
 
     const routeFn = (async () => ({
@@ -281,20 +303,19 @@ describe("runTurn — cost aggregation (Commit 9)", () => {
 
     for await (const _ of runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "go" },
-      { db, routeFn, runKa: mockRunKa },
+      { firestore, routeFn, runKa: mockRunKa },
     )) {
       /* drain */
     }
 
-    const turnInsert = trace.insertValues.find((i) => i.table === "turns");
-    expect(turnInsert).toBeDefined();
-    const values = turnInsert?.values as { costUsd: string };
-    expect(values.costUsd).toBe("0.012300");
+    expect(trace.turnAdds).toHaveLength(1);
+    const values = trace.turnAdds[0] as { costUsd: number };
+    expect(values.costUsd).toBeCloseTo(0.0123, 6);
   });
 
   it("persists 0 when both pre-pass and KA report zero cost", async () => {
-    const trace: DbTrace = { insertValues: [], updateCalls: [] };
-    const db = fakeDb(trace);
+    const trace: FsTrace = { turnAdds: [], campaignSets: [] };
+    const firestore = fakeFirestore(trace);
     const { runTurn } = await import("../turn");
 
     const routeFn = (async () => ({
@@ -316,14 +337,13 @@ describe("runTurn — cost aggregation (Commit 9)", () => {
 
     for await (const _ of runTurn(
       { campaignId: CAMPAIGN_ID, userId: USER_ID, playerMessage: "silent" },
-      { db, routeFn, runKa: mockRunKa },
+      { firestore, routeFn, runKa: mockRunKa },
     )) {
       /* drain */
     }
 
-    const values = trace.insertValues.find((i) => i.table === "turns")?.values as {
-      costUsd: string;
-    };
-    expect(values.costUsd).toBe("0.000000");
+    expect(trace.turnAdds).toHaveLength(1);
+    const values = trace.turnAdds[0] as { costUsd: number };
+    expect(values.costUsd).toBe(0);
   });
 });

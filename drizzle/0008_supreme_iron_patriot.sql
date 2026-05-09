@@ -1,1 +1,0 @@
-ALTER TABLE "turns" ADD COLUMN "style_drift_used" text;

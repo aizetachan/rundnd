@@ -1,5 +1,3 @@
-import { type campaigns, campaigns as campaignsTable } from "@/lib/state/schema";
-import { type Table, getTableName } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -15,43 +13,11 @@ import {
 
 /**
  * These tests validate the registry infrastructure — auth, schema,
- * span wrapping — using a fake Drizzle client. The point is to prove
- * the infrastructure does the right thing; real DB queries are exercised
- * by tool-specific tests and (at M1) by the turn-pipeline integration.
+ * span wrapping — using a fake Firestore client. The point is to
+ * prove the infrastructure does the right thing; real DB queries are
+ * exercised by tool-specific tests and (at M1) by the turn-pipeline
+ * integration.
  */
-
-type FakeRow = Pick<typeof campaigns.$inferSelect, "id" | "userId" | "name" | "settings">;
-
-function fakeDb(rows: FakeRow[]): AidmToolContext["db"] {
-  // Table-aware fake: returns the passed `rows` for campaigns lookups
-  // (authorizeCampaignAccess), empty arrays for everything else. Tools
-  // that actually query their own table (e.g. list_known_npcs) get []
-  // instead of the campaign row spuriously matching their schema.
-  const tableNameOf = (t: unknown): string => {
-    try {
-      return getTableName(t as Table);
-    } catch {
-      return "unknown";
-    }
-  };
-  const rowsFor = (table: unknown): unknown[] => {
-    const name = tableNameOf(table);
-    if (name === getTableName(campaignsTable)) return rows;
-    return [];
-  };
-  return {
-    select: (_cols?: unknown) => ({
-      from: (t: unknown) => ({
-        where: (_cond: unknown) => ({
-          limit: async (_n: number) => rowsFor(t),
-          orderBy: (_o: unknown) => ({
-            limit: async (_n: number) => rowsFor(t),
-          }),
-        }),
-      }),
-    }),
-  } as unknown as AidmToolContext["db"];
-}
 
 /**
  * Fake Firestore that returns the campaign doc for `authorizeCampaignAccess`
@@ -146,7 +112,6 @@ function makeCtx(overrides: Partial<AidmToolContext> = {}): AidmToolContext {
   return {
     campaignId: "c-1",
     userId: "u-1",
-    db: fakeDb([{ id: "c-1", userId: "u-1", name: "test", settings: {} }]),
     firestore: fakeFirestore({}),
     ...overrides,
   };
@@ -262,7 +227,7 @@ describe("tool registry — core infrastructure", () => {
     beforeEach(() => clearRegistryForTesting());
     afterEach(() => clearRegistryForTesting());
 
-    it("authorizeCampaignAccess resolves when the row exists + belongs to user", async () => {
+    it("authorizeCampaignAccess resolves when the doc exists + belongs to user", async () => {
       const ctx = makeCtx();
       await expect(authorizeCampaignAccess(ctx)).resolves.toMatchObject({
         id: "c-1",
@@ -270,7 +235,7 @@ describe("tool registry — core infrastructure", () => {
       });
     });
 
-    it("authorizeCampaignAccess throws AidmAuthError when no row found", async () => {
+    it("authorizeCampaignAccess throws AidmAuthError when no doc found", async () => {
       const ctx = makeCtx({ firestore: fakeFirestore({ campaign: null }) });
       await expect(authorizeCampaignAccess(ctx)).rejects.toBeInstanceOf(AidmAuthError);
     });
@@ -485,32 +450,9 @@ describe("tool registry — core infrastructure", () => {
       expect(await mod.invokeTool("get_voice_patterns", {}, ctx)).toEqual({ patterns: [] });
     });
 
-    it("get_character_sheet returns available:false when no character row exists", async () => {
+    it("get_character_sheet returns available:false when no character doc exists", async () => {
       const mod = await import("../index");
-      // Auth lookup returns the campaign row; character query returns
-      // empty. The generic fakeDb returns the same rows for every
-      // query, so we hand-craft a two-response fake here.
-      let call = 0;
-      const ctx = {
-        ...makeCtx(),
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: async () => {
-                  call += 1;
-                  // Call 1: authorizeCampaignAccess → campaign row exists
-                  if (call === 1) {
-                    return [{ id: "c-1", userId: "u-1", name: "test", settings: {} }];
-                  }
-                  // Call 2: get_character_sheet → no character row
-                  return [];
-                },
-              }),
-            }),
-          }),
-        } as unknown as AidmToolContext["db"],
-      };
+      const ctx = makeCtx({ firestore: fakeFirestore({ characterDocs: [] }) });
       const result = (await mod.invokeTool("get_character_sheet", {}, ctx)) as {
         available: boolean;
         name: string | null;

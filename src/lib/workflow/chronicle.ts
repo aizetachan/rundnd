@@ -1,12 +1,12 @@
 import { type ArcTrigger, type ChroniclerDeps, runChronicler } from "@/lib/agents/chronicler";
 import { incrementCostLedger } from "@/lib/budget";
-import type { Db } from "@/lib/db";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import type { Firestore } from "firebase-admin/firestore";
-// Skip Firestore in tests (Drizzle mocks don't expect it); also tolerate
-// missing FIREBASE_PROJECT_ID outside test. authorizeCampaignAccess +
-// the chronicler tools fall back to ctx.db when ctx.firestore is
-// undefined.
+import { FieldValue } from "firebase-admin/firestore";
+// Firestore in tests is provided directly via deps.firestore. The runtime
+// path is the chronicle dispatch from the SSE route handler, which goes
+// through tryGetFirestore (test env has no project credentials).
 function tryGetFirestore(): Firestore | undefined {
   if (process.env.NODE_ENV === "test") return undefined;
   try {
@@ -16,9 +16,7 @@ function tryGetFirestore(): Firestore | undefined {
   }
 }
 import { decayHeat } from "@/lib/memory/decay";
-import { campaigns, turns } from "@/lib/state/schema";
 import type { AidmToolContext } from "@/lib/tools";
-import { and, eq, isNull, sql } from "drizzle-orm";
 import { resolveModelContext } from "./turn";
 
 /**
@@ -26,36 +24,35 @@ import { resolveModelContext } from "./turn";
  * error swallow. Called from the SSE route handler's `after()` callback so
  * the user's done event has already flushed before Chronicler starts.
  *
- * Design decisions locked at 7.4:
+ * Design decisions (M0.5 Firestore migration):
  *
- *   1. **Advisory lock namespace.** We use a *different* namespace from
- *      the turn-pipeline advisory lock (`turn.ts::campaignToLockKeys`)
- *      so Chronicler doesn't block the next turn's pre-pass. The
- *      Chronicler lock only serializes other Chronicler runs for the
- *      same campaign — turn N+1 can START while turn N's Chronicler is
- *      still running; only turn N+1's Chronicler must wait. The caller
- *      gets FIFO ordering of chronicling (turn N's writes land before
- *      N+1's) without blocking the next narrative turn.
+ *   1. **Firestore-doc mutex.** The Postgres advisory-lock approach
+ *      (`pg_advisory_lock(int4, int4)`) doesn't have a Firestore
+ *      equivalent. We use a flag on the campaign doc:
+ *        - `chroniclerInFlight: boolean`
+ *        - `chroniclerStartedAt: timestamp`
+ *      A second Chronicler invocation that finds `inFlight === true`
+ *      and `now - startedAt < 60s` returns early with `skipped_concurrent`.
+ *      This is coarser than pg_advisory_lock (which would queue) but
+ *      preserves the FIFO-per-campaign invariant for the cases that
+ *      actually matter — back-to-back turns chronicling concurrently.
+ *      Stale-flag GC happens on the next chronicle run when the
+ *      timeout elapses.
  *
- *   2. **Idempotency.** `turns.chronicled_at IS NULL` is the guard. If
- *      a retried Chronicler finds the timestamp set, it returns
- *      early. This protects non-idempotent writes (record_relationship_event
- *      which is append-only; adjust_spotlight_debt which uses SQL
- *      `debt + delta`) from double-application.
+ *   2. **Idempotency.** `turns/{turnId}.chronicledAt == null` is the
+ *      guard. If a retried Chronicler finds the timestamp set, it
+ *      returns early. This protects non-idempotent writes
+ *      (record_relationship_event append-only;
+ *      adjust_spotlight_debt incremental) from double-application.
  *
  *   3. **Error swallow.** Chronicler failures don't retroactively
  *      fail the turn — the player already saw the narrative. We log
- *      the error + leave `chronicled_at` null (so a future retry could
+ *      the error + leave `chronicledAt` null (so a future retry could
  *      run if we add an admin endpoint). The turn data itself is
- *      already committed to the turns row.
- *
- *   4. **Blocking lock.** We use `pg_advisory_lock` (not _try) — turn
- *      N+1's Chronicler WAITS for N's to finish. On Railway's long-
- *      running container this is fine. On serverless, `after()`'s
- *      host still counts against the function's lifetime, but
- *      Chronicler is ~fast-tier latency (<5s typical), so the wait
- *      cost is bounded.
+ *      already committed.
  */
+
+const CHRONICLER_LOCK_TIMEOUT_MS = 60_000;
 
 export interface ChronicleTurnInput {
   turnId: string;
@@ -76,40 +73,61 @@ export interface ChronicleTurnInput {
 }
 
 export interface ChronicleTurnDeps extends ChroniclerDeps {
-  db: Db;
-  /** Override the base lock keys namespace offset for tests (avoid collision). */
-  _lockNamespaceOffset?: number;
+  /** Firestore handle. Tests inject a fake; production resolves via tryGetFirestore. */
+  firestore?: Firestore;
 }
 
 /**
- * Separate namespace for the Chronicler lock so it doesn't collide with
- * the turn-pipeline lock (`turn.ts::campaignToLockKeys`). That lock uses
- * the campaignId's hash directly; we XOR-fold the upper 32 bits with a
- * constant to shift to a new namespace. Chronicler and turn-pipeline
- * can both be acquired simultaneously for different work on the same
- * campaign without deadlock.
+ * Acquire the chronicler mutex on the campaign doc. Returns `true` if
+ * we now hold the lock (the doc didn't have an active flag, or its
+ * timestamp was stale). Returns `false` if a recent in-flight
+ * chronicler is still running.
+ *
+ * Uses a transaction so two simultaneous chronicleTurn invocations
+ * race deterministically — exactly one observes `inFlight === false`
+ * (or stale timestamp) and proceeds; the other backs off.
  */
-const CHRONICLER_LOCK_NAMESPACE_XOR = 0x43_48_52_4e; // "CHRN"
-
-function chroniclerLockKeys(
+async function acquireChroniclerLock(
+  firestore: Firestore,
   campaignId: string,
-  offset = CHRONICLER_LOCK_NAMESPACE_XOR,
-): [number, number] {
-  const hex = campaignId.replace(/-/g, "");
-  const upper = (Number.parseInt(hex.slice(0, 8), 16) | 0) ^ offset;
-  const lower = Number.parseInt(hex.slice(8, 16), 16) | 0;
-  return [upper, lower];
+): Promise<boolean> {
+  const ref = firestore.collection(COL.campaigns).doc(campaignId);
+  return await firestore.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return false;
+    const data = snap.data() ?? {};
+    const inFlight = data.chroniclerInFlight === true;
+    // Timestamp can be a Firestore Timestamp (read path) or undefined.
+    const startedRaw = data.chroniclerStartedAt;
+    const startedAtMs =
+      startedRaw && typeof (startedRaw as { toMillis?: () => number }).toMillis === "function"
+        ? (startedRaw as { toMillis: () => number }).toMillis()
+        : startedRaw instanceof Date
+          ? startedRaw.getTime()
+          : 0;
+    const ageMs = Date.now() - startedAtMs;
+    if (inFlight && ageMs < CHRONICLER_LOCK_TIMEOUT_MS) {
+      return false;
+    }
+    // Either flag was clear, or the timestamp is stale → claim the lock.
+    tx.set(
+      ref,
+      {
+        chroniclerInFlight: true,
+        chroniclerStartedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return true;
+  });
 }
 
-async function acquireChroniclerLock(db: Db, campaignId: string, offset?: number): Promise<void> {
-  const [k1, k2] = chroniclerLockKeys(campaignId, offset);
-  // Blocking acquisition — turn N+1's Chronicler waits for N's to finish.
-  await db.execute(sql`SELECT pg_advisory_lock(${k1}::int, ${k2}::int)`);
-}
-
-async function releaseChroniclerLock(db: Db, campaignId: string, offset?: number): Promise<void> {
-  const [k1, k2] = chroniclerLockKeys(campaignId, offset);
-  await db.execute(sql`SELECT pg_advisory_unlock(${k1}::int, ${k2}::int)`);
+async function releaseChroniclerLock(
+  firestore: Firestore,
+  campaignId: string,
+): Promise<void> {
+  const ref = firestore.collection(COL.campaigns).doc(campaignId);
+  await ref.set({ chroniclerInFlight: false }, { merge: true });
 }
 
 /**
@@ -122,9 +140,10 @@ async function releaseChroniclerLock(db: Db, campaignId: string, offset?: number
 export async function chronicleTurn(
   input: ChronicleTurnInput,
   deps: ChronicleTurnDeps,
-): Promise<"ok" | "already_chronicled" | "failed" | "skipped_non_continue"> {
+): Promise<
+  "ok" | "already_chronicled" | "failed" | "skipped_non_continue" | "skipped_concurrent"
+> {
   const logger = deps.logger ?? ((level, msg, meta) => console.log(`[${level}] ${msg}`, meta));
-  const db = deps.db;
   // Correlation fields attached to every chronicler log so a failure
   // joins up with the originating turn's stdout lines.
   const logContext = {
@@ -134,19 +153,34 @@ export async function chronicleTurn(
   };
   logger("info", "chronicleTurn: start", { ...logContext, turnId: input.turnId });
 
-  await acquireChroniclerLock(db, input.campaignId, deps._lockNamespaceOffset);
+  const firestore = deps.firestore ?? tryGetFirestore();
+  if (!firestore) {
+    logger("warn", "chronicleTurn: firestore unavailable; skipping", { ...logContext });
+    return "failed";
+  }
+
+  const acquired = await acquireChroniclerLock(firestore, input.campaignId);
+  if (!acquired) {
+    logger("info", "chronicleTurn: another run in flight; skipping", { ...logContext });
+    return "skipped_concurrent";
+  }
   try {
     // Idempotency check: was this turn already chronicled?
-    const [existing] = await db
-      .select({ chronicledAt: turns.chronicledAt })
-      .from(turns)
-      .where(eq(turns.id, input.turnId))
-      .limit(1);
-    if (!existing) {
-      logger("warn", "chronicleTurn: turn row not found", { ...logContext, turnId: input.turnId });
+    const turnRef = firestore
+      .collection(COL.campaigns)
+      .doc(input.campaignId)
+      .collection(CAMPAIGN_SUB.turns)
+      .doc(input.turnId);
+    const turnSnap = await turnRef.get();
+    if (!turnSnap.exists) {
+      logger("warn", "chronicleTurn: turn doc not found", {
+        ...logContext,
+        turnId: input.turnId,
+      });
       return "failed";
     }
-    if (existing.chronicledAt !== null) {
+    const turnData = turnSnap.data() ?? {};
+    if (turnData.chronicledAt != null) {
       logger("info", "chronicleTurn: already chronicled, skipping", {
         ...logContext,
         turnId: input.turnId,
@@ -157,33 +191,31 @@ export async function chronicleTurn(
     // Load the campaign fresh for modelContext. Chronicler-time is
     // post-turn, so a settings change during the turn is fine to pick
     // up on the background pass.
-    const [campaign] = await db
-      .select()
-      .from(campaigns)
-      .where(
-        and(
-          eq(campaigns.id, input.campaignId),
-          eq(campaigns.userId, input.userId),
-          isNull(campaigns.deletedAt),
-        ),
-      )
-      .limit(1);
-    if (!campaign) {
+    const campaignSnap = await firestore.collection(COL.campaigns).doc(input.campaignId).get();
+    if (!campaignSnap.exists) {
       logger("warn", "chronicleTurn: campaign not found (deleted or transferred?)", {
         ...logContext,
       });
       return "failed";
     }
+    const campaignData = campaignSnap.data();
+    if (
+      !campaignData ||
+      campaignData.ownerUid !== input.userId ||
+      campaignData.deletedAt !== null
+    ) {
+      logger("warn", "chronicleTurn: campaign access denied", { ...logContext });
+      return "failed";
+    }
 
     // resolveModelContext always returns a config (falls back to
     // anthropicFallbackConfig internally on parse failure / missing fields).
-    const modelContext = resolveModelContext(campaign.settings, logger);
+    const modelContext = resolveModelContext(campaignData.settings, logger);
 
     const toolContext: AidmToolContext = {
       campaignId: input.campaignId,
       userId: input.userId,
-      db,
-      firestore: tryGetFirestore(),
+      firestore,
       trace: deps.trace,
       logger,
       logContext,
@@ -215,49 +247,37 @@ export async function chronicleTurn(
     // Earlier memories get their turn-distance multiplier applied.
     // Runs best-effort: a decay failure is logged but doesn't fail the
     // chronicling pass, which has already been stamped-idempotent.
-    //
-    // Firestore-only: skip the decay pass when ctx.firestore is unavailable
-    // (test environment running against the legacy Drizzle fake). The
-    // skip is logged so silent no-ops don't go unnoticed in production.
-    if (toolContext.firestore) {
-      try {
-        const decayResult = await decayHeat(
-          toolContext.firestore,
-          input.campaignId,
-          input.turnNumber,
-        );
-        logger("info", "chronicleTurn: decayHeat ok", {
-          ...logContext,
-          rowsAffected: decayResult.rowsAffected,
-        });
-      } catch (err) {
-        logger("warn", "chronicleTurn: decayHeat failed (non-fatal)", {
-          ...logContext,
-          turnId: input.turnId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } else {
-      logger("info", "chronicleTurn: decayHeat skipped (firestore unavailable)", {
+    try {
+      const decayResult = await decayHeat(firestore, input.campaignId, input.turnNumber);
+      logger("info", "chronicleTurn: decayHeat ok", {
+        ...logContext,
+        rowsAffected: decayResult.rowsAffected,
+      });
+    } catch (err) {
+      logger("warn", "chronicleTurn: decayHeat failed (non-fatal)", {
         ...logContext,
         turnId: input.turnId,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
 
     // Chronicler cost roll-up (Commit 9). Agent SDK returns the full
     // session cost including any consultant subagent (RelationshipAnalyzer).
-    // Adds into the turn row's costUsd + user_cost_ledger, both safe to
+    // Adds into the turn doc's costUsd + user_cost_ledger, both safe to
     // call with 0 (no-op updates).
     const chroniclerCost = chroniclerResult.costUsd ?? 0;
     if (chroniclerCost > 0) {
-      // NUMERIC addition in SQL preserves precision across the ledger.
-      await db
-        .update(turns)
-        .set({
-          costUsd: sql`COALESCE(${turns.costUsd}, 0) + ${chroniclerCost.toFixed(6)}`,
-          chronicledAt: new Date(),
-        })
-        .where(eq(turns.id, input.turnId));
+      // Numeric increment preserves the running total across the chronicle
+      // pass. costUsd is stored as a number in Firestore (Postgres NUMERIC
+      // gave us 6-decimal precision; floats are fine for cost roll-up at
+      // M0.5 — billing reconciliation, not finance).
+      await turnRef.set(
+        {
+          costUsd: FieldValue.increment(chroniclerCost),
+          chronicledAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
       try {
         await incrementCostLedger(input.userId, chroniclerCost);
       } catch (err) {
@@ -274,7 +294,10 @@ export async function chronicleTurn(
       }
     } else {
       // No cost — just stamp chronicledAt.
-      await db.update(turns).set({ chronicledAt: new Date() }).where(eq(turns.id, input.turnId));
+      await turnRef.set(
+        { chronicledAt: FieldValue.serverTimestamp() },
+        { merge: true },
+      );
     }
 
     logger("info", "chronicleTurn: ok", {
@@ -296,9 +319,8 @@ export async function chronicleTurn(
     return "failed";
   } finally {
     // Release the lock even on error so the next turn's Chronicler
-    // can proceed. PG releases on connection drop anyway, but explicit
-    // release is tidy.
-    await releaseChroniclerLock(db, input.campaignId, deps._lockNamespaceOffset).catch(() => {
+    // can proceed.
+    await releaseChroniclerLock(firestore, input.campaignId).catch(() => {
       /* best-effort */
     });
   }

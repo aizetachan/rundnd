@@ -6,7 +6,7 @@
  * fields existed; they'd otherwise fall back to env defaults through
  * `anthropicFallbackConfig()` at every turn, which works but obscures
  * the source of truth. This script writes the Anthropic defaults
- * directly onto the row so the settings blob is self-describing.
+ * directly onto the doc so the settings blob is self-describing.
  *
  * Idempotent: campaigns that already carry `provider` + `tier_models`
  * are left alone. Safe to run N times.
@@ -15,31 +15,30 @@
  *   pnpm tsx scripts/migrate-campaign-providers.ts
  *   pnpm tsx scripts/migrate-campaign-providers.ts --dry-run
  */
-import { getDb } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
 import { anthropicFallbackConfig } from "@/lib/providers";
-import { campaigns } from "@/lib/state/schema";
 import { CampaignSettings, hasProviderConfig } from "@/lib/types/campaign-settings";
-import { eq } from "drizzle-orm";
 
 async function main() {
   const dryRun = process.argv.includes("--dry-run");
-  const db = getDb();
+  const firestore = getFirebaseFirestore();
 
-  const rows = await db
-    .select({ id: campaigns.id, name: campaigns.name, settings: campaigns.settings })
-    .from(campaigns);
-
-  console.log(`Scanning ${rows.length} campaign row(s)…`);
+  const snap = await firestore.collection(COL.campaigns).get();
+  console.log(`Scanning ${snap.size} campaign doc(s)…`);
 
   let migrated = 0;
   let skipped = 0;
   const fallback = anthropicFallbackConfig();
 
-  for (const row of rows) {
-    const parsed = CampaignSettings.safeParse(row.settings ?? {});
+  for (const doc of snap.docs) {
+    const data = doc.data() ?? {};
+    const settings = data.settings ?? {};
+    const parsed = CampaignSettings.safeParse(settings);
+    const name = typeof data.name === "string" ? data.name : "(unnamed)";
     if (!parsed.success) {
       console.warn(
-        `  ! ${row.id} (${row.name}): settings parse failed — skipping. Issues:`,
+        `  ! ${doc.id} (${name}): settings parse failed — skipping. Issues:`,
         parsed.error.issues.map((i) => i.message),
       );
       skipped += 1;
@@ -54,9 +53,9 @@ async function main() {
       provider: fallback.provider,
       tier_models: fallback.tier_models,
     };
-    console.log(`  → ${row.id} (${row.name}): adding provider=${fallback.provider}`);
+    console.log(`  → ${doc.id} (${name}): adding provider=${fallback.provider}`);
     if (!dryRun) {
-      await db.update(campaigns).set({ settings: next }).where(eq(campaigns.id, row.id));
+      await doc.ref.set({ settings: next }, { merge: true });
     }
     migrated += 1;
   }

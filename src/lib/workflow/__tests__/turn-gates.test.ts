@@ -1,8 +1,8 @@
-import type { Db } from "@/lib/db";
-import type { characters } from "@/lib/state/schema";
 import type { IntentOutput } from "@/lib/types/turn";
+import type { Firestore } from "firebase-admin/firestore";
 import { describe, expect, it } from "vitest";
 import {
+  type LoadedCharacter,
   computeEffectiveCompositionMode,
   resolveModelContext,
   retrievalBudget,
@@ -152,19 +152,30 @@ describe("resolveModelContext", () => {
 });
 
 describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministic)", () => {
-  /** Build a fake Db that returns a specified defender NPC tier lookup. */
-  function fakeDb(defenderTier: string | null): Db {
-    return {
-      select: (_cols?: unknown) => ({
-        from: (_table: unknown) => ({
-          where: (_w: unknown) => ({
-            limit: async () => (defenderTier === null ? [] : [{ powerTier: defenderTier }]),
+  /** Build a fake Firestore that returns a specified defender NPC tier lookup. */
+  function fakeFs(defenderTier: string | null): Firestore {
+    const npcsCol = {
+      where: () => ({
+        limit: () => ({
+          get: async () => ({
+            empty: defenderTier === null,
+            docs:
+              defenderTier === null
+                ? []
+                : [{ data: () => ({ powerTier: defenderTier }) }],
           }),
         }),
       }),
-    } as unknown as Db;
+    };
+    const campaignDoc = { collection: () => npcsCol };
+    return {
+      collection: (name: string) => {
+        if (name === "campaigns") return { doc: () => campaignDoc };
+        throw new Error(`unexpected collection ${name}`);
+      },
+    } as unknown as Firestore;
   }
-  function fakeCharacter(tier: string): typeof characters.$inferSelect {
+  function fakeCharacter(tier: string): LoadedCharacter {
     return {
       id: "char-1",
       campaignId: "camp-1",
@@ -173,12 +184,12 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
       powerTier: tier,
       sheet: {},
       createdAt: new Date(),
-    } as typeof characters.$inferSelect;
+    };
   }
 
   it("returns 'not_applicable' for non-combat intents", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T8"),
+      fakeFs("T8"),
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "SOCIAL" }),
@@ -189,7 +200,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
 
   it("returns 'not_applicable' when character has no tier", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T8"),
+      fakeFs("T8"),
       "camp-1",
       null,
       intent({ intent: "COMBAT", target: "Vicious" }),
@@ -200,7 +211,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
 
   it("returns 'not_applicable' when no defender can be identified", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T8"),
+      fakeFs("T8"),
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "COMBAT" }), // no target, no present_npcs
@@ -211,7 +222,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
 
   it("returns 'not_applicable' when defender NPC is not catalogued", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb(null), // DB returns empty — NPC not in catalog
+      fakeFs(null), // DB returns empty — NPC not in catalog
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "COMBAT", target: "Mystery Mook" }),
@@ -223,7 +234,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
   it("returns 'op_dominant' when attacker is 3+ tiers above defender (T3 vs T6+)", async () => {
     // T3 attacker, T6 defender: diff = 6-3 = 3 → op_dominant
     const modeA = await computeEffectiveCompositionMode(
-      fakeDb("T6"),
+      fakeFs("T6"),
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "COMBAT", target: "Mook" }),
@@ -232,7 +243,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
     expect(modeA).toBe("op_dominant");
     // T3 attacker, T9 defender: diff = 9-3 = 6 → op_dominant
     const modeB = await computeEffectiveCompositionMode(
-      fakeDb("T9"),
+      fakeFs("T9"),
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "COMBAT", target: "Mook" }),
@@ -244,7 +255,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
   it("returns 'blended' when attacker is exactly 2 tiers above defender", async () => {
     // T5 attacker, T7 defender: diff = 7-5 = 2 → blended
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T7"),
+      fakeFs("T7"),
       "camp-1",
       fakeCharacter("T5"),
       intent({ intent: "COMBAT", target: "Enemy" }),
@@ -256,7 +267,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
   it("returns 'standard' for parity exchanges", async () => {
     // T5 vs T5: diff = 0 → standard
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T5"),
+      fakeFs("T5"),
       "camp-1",
       fakeCharacter("T5"),
       intent({ intent: "COMBAT", target: "Peer" }),
@@ -268,7 +279,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
   it("returns 'standard' when attacker is WEAKER than defender (negative diff)", async () => {
     // T9 attacker vs T3 defender: diff = 3-9 = -6 → standard (attacker underdog)
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T3"),
+      fakeFs("T3"),
       "camp-1",
       fakeCharacter("T9"),
       intent({ intent: "COMBAT", target: "Godlike" }),
@@ -279,7 +290,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
 
   it("falls back to first present NPC when intent.target is absent", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T8"),
+      fakeFs("T8"),
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "ABILITY" }), // no target
@@ -291,7 +302,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
 
   it("handles malformed tier strings gracefully (returns 'not_applicable')", async () => {
     const mode = await computeEffectiveCompositionMode(
-      fakeDb("T11"), // out of range
+      fakeFs("T11"), // out of range
       "camp-1",
       fakeCharacter("T3"),
       intent({ intent: "COMBAT", target: "x" }),
@@ -300,7 +311,7 @@ describe("computeEffectiveCompositionMode (§7.3 scale-selector — deterministi
     expect(mode).toBe("not_applicable");
 
     const mode2 = await computeEffectiveCompositionMode(
-      fakeDb("T5"),
+      fakeFs("T5"),
       "camp-1",
       fakeCharacter("garbage"),
       intent({ intent: "COMBAT", target: "x" }),

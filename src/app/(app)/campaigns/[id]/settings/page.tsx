@@ -1,14 +1,13 @@
 import { getCurrentUser } from "@/lib/auth";
-import { getDb } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
 import {
   type CampaignProviderConfig,
   type ProviderDefinition,
   anthropicFallbackConfig,
   listProviders,
 } from "@/lib/providers";
-import { campaigns } from "@/lib/state/schema";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
-import { and, eq, isNull } from "drizzle-orm";
 import { notFound, redirect } from "next/navigation";
 import { serializeProviderConfigToken } from "./merge";
 import SettingsUI from "./settings-ui";
@@ -33,20 +32,15 @@ export default async function CampaignSettingsPage({ params }: PageProps) {
   if (!user) redirect("/sign-in");
 
   const { id } = await params;
-  const db = getDb();
+  const firestore = getFirebaseFirestore();
 
-  const [campaign] = await db
-    .select({
-      id: campaigns.id,
-      name: campaigns.name,
-      settings: campaigns.settings,
-    })
-    .from(campaigns)
-    .where(and(eq(campaigns.id, id), eq(campaigns.userId, user.id), isNull(campaigns.deletedAt)))
-    .limit(1);
-  if (!campaign) notFound();
+  const snap = await firestore.collection(COL.campaigns).doc(id).get();
+  if (!snap.exists) notFound();
+  const cd = snap.data();
+  if (!cd || cd.ownerUid !== user.id || cd.deletedAt !== null) notFound();
 
-  const parsed = CampaignSettings.safeParse(campaign.settings ?? {});
+  const settingsRaw = cd.settings ?? {};
+  const parsed = CampaignSettings.safeParse(settingsRaw);
   const current: CampaignProviderConfig =
     parsed.success && parsed.data.provider && parsed.data.tier_models
       ? { provider: parsed.data.provider, tier_models: parsed.data.tier_models }
@@ -63,12 +57,14 @@ export default async function CampaignSettingsPage({ params }: PageProps) {
   // editing this one." Scoped to just these fields — unrelated
   // background writes (e.g. memory writer landing at M4) won't
   // spuriously invalidate this form.
-  const configToken = serializeProviderConfigToken(campaign.settings);
+  const configToken = serializeProviderConfigToken(settingsRaw);
+
+  const name = typeof cd.name === "string" ? cd.name : "";
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">{campaign.name}</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
         <p className="text-muted-foreground text-sm">
           Provider + model selection for this campaign. Changes take effect on the next turn;
           existing turns keep the voice they were written in.
@@ -76,7 +72,7 @@ export default async function CampaignSettingsPage({ params }: PageProps) {
       </header>
 
       <SettingsUI
-        campaignId={campaign.id}
+        campaignId={snap.id}
         providers={providers}
         current={current}
         configToken={configToken}

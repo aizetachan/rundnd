@@ -1,5 +1,5 @@
-import type { Db } from "@/lib/db";
 import type { Profile } from "@/lib/types/profile";
+import type { Firestore } from "firebase-admin/firestore";
 import { describe, expect, it } from "vitest";
 import {
   assembleSessionRuleLibraryGuidance,
@@ -10,9 +10,9 @@ import {
 } from "../library";
 
 /**
- * Rule library getters — tests against a fake Db that returns fixture
- * rows keyed on the query's filter shape. Real DB-backed testing is an
- * acceptance-ritual target; these unit tests prove the getter logic +
+ * Rule library getters — tests against a fake Firestore that returns
+ * fixture rows keyed on the query's category. Real DB-backed testing is
+ * an acceptance-ritual target; these unit tests prove the getter logic +
  * snap-to-nearest + section rendering.
  */
 
@@ -21,98 +21,161 @@ interface FakeRow {
   axis: string | null;
   valueKey: string | null;
   content: string;
+  /** Optional powerTier / ensembleArchetype fields used by the npcs subcollection fixture. */
+  powerTier?: string;
+  ensembleArchetype?: string;
 }
 
-function fakeDb(rows: FakeRow[]): Db {
-  return {
-    select: (_cols?: unknown) => ({
-      from: (_t: unknown) => ({
-        where: (_w: unknown) => ({
-          limit: async () => rows,
+interface FakeFirestoreOpts {
+  rules: FakeRow[];
+  npcs?: Array<{ powerTier?: string; ensembleArchetype?: string }>;
+}
+
+function fakeFirestore(opts: FakeFirestoreOpts): Firestore {
+  const rules = opts.rules;
+  const npcs = opts.npcs ?? [];
+
+  function rulesQueryFor(filters: Record<string, unknown>): {
+    where: (k: string, op: string, v: unknown) => ReturnType<typeof rulesQueryFor>;
+    limit: (_n: number) => {
+      get: () => Promise<{
+        empty: boolean;
+        docs: Array<{ data: () => Record<string, unknown> }>;
+      }>;
+    };
+  } {
+    const filtered = rules.filter((r) =>
+      Object.entries(filters).every(([k, v]) => (r as unknown as Record<string, unknown>)[k] === v),
+    );
+    return {
+      where: (k: string, _op: string, v: unknown) => rulesQueryFor({ ...filters, [k]: v }),
+      limit: (_n: number) => ({
+        get: async () => ({
+          empty: filtered.length === 0,
+          docs: filtered.map((r) => ({ data: () => r as unknown as Record<string, unknown> })),
         }),
       }),
+    };
+  }
+
+  const npcsCollection = {
+    limit: (_n: number) => ({
+      get: async () => ({
+        empty: npcs.length === 0,
+        docs: npcs.map((n) => ({ data: () => n as Record<string, unknown> })),
+      }),
     }),
-  } as unknown as Db;
+  };
+
+  const campaignsCol = {
+    doc: () => ({
+      collection: (_name: string) => npcsCollection,
+    }),
+  };
+
+  return {
+    collection: (name: string) => {
+      if (name === "ruleLibraryChunks") {
+        return {
+          where: (k: string, op: string, v: unknown) => rulesQueryFor({ [k]: v }),
+        };
+      }
+      if (name === "campaigns") return campaignsCol;
+      throw new Error(`unexpected collection ${name}`);
+    },
+  } as unknown as Firestore;
 }
 
 describe("getDnaGuidance — snap-to-nearest", () => {
   it("snaps value 0-2 to '1'", async () => {
-    const db = fakeDb([
-      { category: "dna", axis: "optimism", valueKey: "1", content: "low optimism guidance" },
-    ]);
-    expect(await getDnaGuidance(db, "optimism", 0)).toBe("low optimism guidance");
-    expect(await getDnaGuidance(db, "optimism", 2)).toBe("low optimism guidance");
+    const fs = fakeFirestore({
+      rules: [
+        { category: "dna", axis: "optimism", valueKey: "1", content: "low optimism guidance" },
+      ],
+    });
+    expect(await getDnaGuidance(fs, "optimism", 0)).toBe("low optimism guidance");
+    expect(await getDnaGuidance(fs, "optimism", 2)).toBe("low optimism guidance");
   });
 
   it("snaps value 3-7 to '5'", async () => {
-    const db = fakeDb([
-      { category: "dna", axis: "optimism", valueKey: "5", content: "mid optimism guidance" },
-    ]);
-    expect(await getDnaGuidance(db, "optimism", 3)).toBe("mid optimism guidance");
-    expect(await getDnaGuidance(db, "optimism", 5)).toBe("mid optimism guidance");
-    expect(await getDnaGuidance(db, "optimism", 7)).toBe("mid optimism guidance");
+    const fs = fakeFirestore({
+      rules: [
+        { category: "dna", axis: "optimism", valueKey: "5", content: "mid optimism guidance" },
+      ],
+    });
+    expect(await getDnaGuidance(fs, "optimism", 3)).toBe("mid optimism guidance");
+    expect(await getDnaGuidance(fs, "optimism", 5)).toBe("mid optimism guidance");
+    expect(await getDnaGuidance(fs, "optimism", 7)).toBe("mid optimism guidance");
   });
 
   it("snaps value 8-10 to '10'", async () => {
-    const db = fakeDb([
-      { category: "dna", axis: "optimism", valueKey: "10", content: "high optimism guidance" },
-    ]);
-    expect(await getDnaGuidance(db, "optimism", 8)).toBe("high optimism guidance");
-    expect(await getDnaGuidance(db, "optimism", 10)).toBe("high optimism guidance");
+    const fs = fakeFirestore({
+      rules: [
+        { category: "dna", axis: "optimism", valueKey: "10", content: "high optimism guidance" },
+      ],
+    });
+    expect(await getDnaGuidance(fs, "optimism", 8)).toBe("high optimism guidance");
+    expect(await getDnaGuidance(fs, "optimism", 10)).toBe("high optimism guidance");
   });
 
   it("returns null when no row matches", async () => {
-    const db = fakeDb([]);
-    expect(await getDnaGuidance(db, "optimism", 5)).toBe(null);
+    const fs = fakeFirestore({ rules: [] });
+    expect(await getDnaGuidance(fs, "optimism", 5)).toBe(null);
   });
 });
 
 describe("getCompositionGuidance", () => {
   it("looks up by (category=composition, axis, valueKey)", async () => {
-    const db = fakeDb([
-      {
-        category: "composition",
-        axis: "tension_source",
-        valueKey: "existential",
-        content: "existential tension guidance",
-      },
-    ]);
-    expect(await getCompositionGuidance(db, "tension_source", "existential")).toBe(
+    const fs = fakeFirestore({
+      rules: [
+        {
+          category: "composition",
+          axis: "tension_source",
+          valueKey: "existential",
+          content: "existential tension guidance",
+        },
+      ],
+    });
+    expect(await getCompositionGuidance(fs, "tension_source", "existential")).toBe(
       "existential tension guidance",
     );
   });
 
   it("returns null on miss", async () => {
-    const db = fakeDb([]);
-    expect(await getCompositionGuidance(db, "tension_source", "nonexistent")).toBe(null);
+    const fs = fakeFirestore({ rules: [] });
+    expect(await getCompositionGuidance(fs, "tension_source", "nonexistent")).toBe(null);
   });
 });
 
 describe("getPowerTierGuidance", () => {
   it("looks up by (category=power_tier, axis=null, valueKey=T-number)", async () => {
-    const db = fakeDb([
-      {
-        category: "power_tier",
-        axis: null,
-        valueKey: "T5",
-        content: "tier 5 guidance",
-      },
-    ]);
-    expect(await getPowerTierGuidance(db, "T5")).toBe("tier 5 guidance");
+    const fs = fakeFirestore({
+      rules: [
+        {
+          category: "power_tier",
+          axis: null,
+          valueKey: "T5",
+          content: "tier 5 guidance",
+        },
+      ],
+    });
+    expect(await getPowerTierGuidance(fs, "T5")).toBe("tier 5 guidance");
   });
 });
 
 describe("getArchetypeGuidance", () => {
   it("looks up by (category=archetype, axis=null, valueKey=archetype name)", async () => {
-    const db = fakeDb([
-      {
-        category: "archetype",
-        axis: null,
-        valueKey: "struggler",
-        content: "struggler guidance",
-      },
-    ]);
-    expect(await getArchetypeGuidance(db, "struggler")).toBe("struggler guidance");
+    const fs = fakeFirestore({
+      rules: [
+        {
+          category: "archetype",
+          axis: null,
+          valueKey: "struggler",
+          content: "struggler guidance",
+        },
+      ],
+    });
+    expect(await getArchetypeGuidance(fs, "struggler")).toBe("struggler guidance");
   });
 });
 
@@ -214,26 +277,25 @@ describe("assembleSessionRuleLibraryGuidance — bundle shape", () => {
   };
 
   it("returns a non-empty bundle with sections populated when DB has content", async () => {
-    // Fake DB returns the same fake rows regardless of query — good enough
-    // to verify section composition + heading rendering. Axis names must
-    // match v4's DNAScales ("optimism") not v3's ("optimism").
     // profile.canonical_dna.optimism = 3 → snaps to valueKey "5".
     // profile.canonical_composition.tension_source = "existential".
-    const db = fakeDb([
-      {
-        category: "dna",
-        axis: "optimism",
-        valueKey: "5",
-        content: "optimism 5 content",
-      },
-      {
-        category: "composition",
-        axis: "tension_source",
-        valueKey: "existential",
-        content: "existential tension content",
-      },
-    ]);
-    const bundle = await assembleSessionRuleLibraryGuidance(db, {
+    const fs = fakeFirestore({
+      rules: [
+        {
+          category: "dna",
+          axis: "optimism",
+          valueKey: "5",
+          content: "optimism 5 content",
+        },
+        {
+          category: "composition",
+          axis: "tension_source",
+          valueKey: "existential",
+          content: "existential tension content",
+        },
+      ],
+    });
+    const bundle = await assembleSessionRuleLibraryGuidance(fs, {
       profile,
       characterPowerTier: "T7",
       campaignId: "c-1",
@@ -247,8 +309,8 @@ describe("assembleSessionRuleLibraryGuidance — bundle shape", () => {
   });
 
   it("returns an empty string when DB has no matching content (graceful degradation)", async () => {
-    const db = fakeDb([]);
-    const bundle = await assembleSessionRuleLibraryGuidance(db, {
+    const fs = fakeFirestore({ rules: [] });
+    const bundle = await assembleSessionRuleLibraryGuidance(fs, {
       profile,
       characterPowerTier: null,
       campaignId: "c-1",

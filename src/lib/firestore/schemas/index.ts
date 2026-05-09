@@ -13,6 +13,7 @@ export * from "./location";
 export * from "./npc";
 export * from "./profile";
 export * from "./relationshipEvent";
+export * from "./ruleLibraryChunk";
 export * from "./semanticMemory";
 export * from "./spotlightDebt";
 export * from "./turn";

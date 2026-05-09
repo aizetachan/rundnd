@@ -1,1 +1,0 @@
-ALTER TABLE "turns" ADD COLUMN "flags" jsonb DEFAULT '[]'::jsonb NOT NULL;

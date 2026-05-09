@@ -1,14 +1,13 @@
 import { getCurrentUser } from "@/lib/auth";
 import { checkBudget, incrementCostLedger } from "@/lib/budget";
-import { getDb } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import { COL } from "@/lib/firestore";
 import { getLangfuse } from "@/lib/observability/langfuse";
-import { campaigns } from "@/lib/state/schema";
 import type { AidmSpanHandle } from "@/lib/tools";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
 import { chronicleTurn, computeArcTrigger } from "@/lib/workflow/chronicle";
 import { runMeta, shouldDispatchMeta } from "@/lib/workflow/meta";
 import { runTurn } from "@/lib/workflow/turn";
-import { and, eq, isNull } from "drizzle-orm";
 import { NextResponse, after } from "next/server";
 import { z } from "zod";
 
@@ -155,35 +154,35 @@ export async function POST(req: Request) {
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      // Prime the connection through Railway's reverse proxy. Small
-      // SSE streams (router short-circuit path: ~2 tiny events, no
-      // token-deltas in between) can sit buffered upstream until the
-      // stream closes, so the client sees nothing live and events
-      // only surface via DB-backed page refresh. Sending a leading
-      // comment line with padding immediately flushes through any
-      // buffer threshold. Comment lines (`:<text>\n`) are ignored by
-      // SSE parsers per the spec.
+      // Prime the connection through the proxy. Small SSE streams
+      // (router short-circuit path: ~2 tiny events, no token-deltas in
+      // between) can sit buffered upstream until the stream closes,
+      // so the client sees nothing live and events only surface via
+      // page refresh. Sending a leading comment line with padding
+      // immediately flushes through any buffer threshold. Comment
+      // lines (`:<text>\n`) are ignored by SSE parsers per the spec.
       controller.enqueue(new TextEncoder().encode(`: stream open${" ".repeat(2048)}\n\n`));
 
       try {
-        const db = getDb();
+        const firestore = getFirebaseFirestore();
 
         // Phase 5 meta-conversation dispatch. Pre-parse for slash
         // commands + check in-flight meta state; route to runMeta when
-        // appropriate, runTurn otherwise. The DB lookup is cheap and
-        // bounded; avoids a full runTurn round-trip for meta exchanges.
-        const [campaignRow] = await db
-          .select({ settings: campaigns.settings })
-          .from(campaigns)
-          .where(
-            and(
-              eq(campaigns.id, body.campaignId),
-              eq(campaigns.userId, user.id),
-              isNull(campaigns.deletedAt),
-            ),
-          )
-          .limit(1);
-        const parsed = CampaignSettings.safeParse(campaignRow?.settings ?? {});
+        // appropriate, runTurn otherwise. The Firestore lookup is
+        // cheap and bounded; avoids a full runTurn round-trip for
+        // meta exchanges.
+        const campaignSnap = await firestore
+          .collection(COL.campaigns)
+          .doc(body.campaignId)
+          .get();
+        const campaignData = campaignSnap.exists ? campaignSnap.data() : undefined;
+        const settingsRaw =
+          campaignData &&
+          campaignData.ownerUid === user.id &&
+          campaignData.deletedAt === null
+            ? campaignData.settings
+            : undefined;
+        const parsed = CampaignSettings.safeParse(settingsRaw ?? {});
         const metaState = parsed.success ? parsed.data.meta_conversation : undefined;
 
         // If the player resumed with a suffix, consume it as the turn
@@ -196,7 +195,7 @@ export async function POST(req: Request) {
               userId: user.id,
               playerMessage: body.message,
             },
-            { db, trace },
+            { firestore, trace },
           );
           let pendingResumeSuffix: string | undefined;
           for await (const ev of metaIter) {
@@ -208,7 +207,7 @@ export async function POST(req: Request) {
           // suffix as the gameplay message. Otherwise emit a distinct
           // `meta_done` terminal event so the client knows the meta
           // exchange concluded WITHOUT committing a phantom turn_number=0
-          // row to the gameplay feed. The gameplay `done` event is
+          // doc to the gameplay feed. The gameplay `done` event is
           // reserved for real turns that advance the turn counter.
           if (pendingResumeSuffix) {
             // Intentional fallthrough — continue to runTurn below.
@@ -230,7 +229,7 @@ export async function POST(req: Request) {
             playerMessage: body.message,
             abort,
           },
-          { db, trace },
+          { firestore, trace },
         );
         for await (const ev of iter) {
           const { type, ...rest } = ev;
@@ -282,7 +281,7 @@ export async function POST(req: Request) {
                 arcTrigger: computeArcTrigger(ev.intent.epicness, ev.turnNumber),
               };
               after(async () => {
-                await chronicleTurn(chronicleInput, { db, trace });
+                await chronicleTurn(chronicleInput, { firestore, trace });
               });
             }
             break;

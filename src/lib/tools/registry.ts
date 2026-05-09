@@ -1,6 +1,4 @@
 import { COL } from "@/lib/firestore";
-import { campaigns } from "@/lib/state/schema";
-import { and, eq, isNull } from "drizzle-orm";
 import type { z } from "zod";
 import { AidmAuthError, type AidmToolContext, type AidmToolSpec } from "./types";
 
@@ -46,16 +44,9 @@ export function clearRegistryForTesting(): void {
  * Authorize a campaign access. Throws AidmAuthError if the campaign
  * does not exist, was soft-deleted, or is not owned by the caller.
  * Returns the campaign doc data on success.
- *
- * Dual-mode during the M0.5 Fase 3 migration:
- *   - When ctx.firestore is present, reads from Firestore (canonical).
- *   - Otherwise falls back to ctx.db (Drizzle / Postgres). The fallback
- *     keeps legacy chronicler/episodic tests passing while their tools
- *     are still on Drizzle. Once all tools migrate, the Drizzle branch
- *     and the `db` field both go away.
  */
 export async function authorizeCampaignAccess(
-  ctx: Pick<AidmToolContext, "campaignId" | "userId" | "firestore" | "db">,
+  ctx: Pick<AidmToolContext, "campaignId" | "userId" | "firestore">,
 ): Promise<{
   id: string;
   ownerUid: string;
@@ -67,47 +58,25 @@ export async function authorizeCampaignAccess(
   createdAt: unknown;
   deletedAt: unknown;
 }> {
-  if (ctx.firestore) {
-    const snap = await ctx.firestore.collection(COL.campaigns).doc(ctx.campaignId).get();
-    if (!snap.exists) throw new AidmAuthError();
-    const data = snap.data();
-    if (!data || data.ownerUid !== ctx.userId || data.deletedAt !== null) {
-      throw new AidmAuthError();
-    }
-    return {
-      id: snap.id,
-      ownerUid: data.ownerUid,
-      userId: data.ownerUid,
-      name: data.name,
-      phase: data.phase,
-      profileRefs: data.profileRefs,
-      settings: data.settings,
-      createdAt: data.createdAt,
-      deletedAt: data.deletedAt,
-    };
+  if (!ctx.firestore) throw new AidmAuthError();
+  const snap = await ctx.firestore.collection(COL.campaigns).doc(ctx.campaignId).get();
+  if (!snap.exists) throw new AidmAuthError();
+  const data = snap.data();
+  if (!data || data.ownerUid !== ctx.userId || data.deletedAt !== null) {
+    throw new AidmAuthError();
   }
-  const [row] = await ctx.db
-    .select()
-    .from(campaigns)
-    .where(
-      and(
-        eq(campaigns.id, ctx.campaignId),
-        eq(campaigns.userId, ctx.userId),
-        isNull(campaigns.deletedAt),
-      ),
-    )
-    .limit(1);
-  if (!row) throw new AidmAuthError();
   return {
-    id: row.id,
-    ownerUid: row.userId,
-    userId: row.userId,
-    name: row.name,
-    phase: row.phase,
-    profileRefs: row.profileRefs,
-    settings: row.settings,
-    createdAt: row.createdAt,
-    deletedAt: row.deletedAt,
+    id: snap.id,
+    ownerUid: data.ownerUid,
+    // Backwards-compat alias for callers that still expect `userId`. New
+    // code should read `ownerUid`. The two fields hold the same value.
+    userId: data.ownerUid,
+    name: data.name,
+    phase: data.phase,
+    profileRefs: data.profileRefs,
+    settings: data.settings,
+    createdAt: data.createdAt,
+    deletedAt: data.deletedAt,
   };
 }
 

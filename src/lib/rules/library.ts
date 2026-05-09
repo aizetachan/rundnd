@@ -1,13 +1,12 @@
-import type { Db } from "@/lib/db";
-import { npcs, ruleLibraryChunks } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import type { Composition } from "@/lib/types/composition";
 import type { DNAScales } from "@/lib/types/dna";
 import type { Profile } from "@/lib/types/profile";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import type { Firestore } from "firebase-admin/firestore";
 
 /**
  * Rule library getters — deterministic lookups keyed on (category, axis,
- * value_key). The content lives in `rule_library_chunks` (populated by
+ * value_key). The content lives in `ruleLibraryChunks` (populated by
  * `pnpm rules:index` from `rule_library/**\/*.yaml`).
  *
  * At session start, `assembleSessionRuleLibraryGuidance` pulls the
@@ -15,7 +14,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
  * in-play archetypes) and concatenates a prose bundle KA reads in
  * Block 1 under "Rule-library guidance for this session". Block 1 is
  * cached across the session, so the bundle is computed once per turn
- * (cheap — four small DB queries) and will move to session-cache
+ * (cheap — four small Firestore queries) and will move to session-cache
  * (campaign.settings.session_cache) in Phase 7 polish.
  *
  * Without this layer, `heroism: 7` renders as a bare number in Block 1
@@ -30,27 +29,28 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 // ---------------------------------------------------------------------------
 
 async function lookupContent(
-  db: Db,
+  firestore: Firestore,
   category: string,
   axis: string | null,
   valueKey: string,
 ): Promise<string | null> {
-  const [row] = await db
-    .select({ content: ruleLibraryChunks.content })
-    .from(ruleLibraryChunks)
-    .where(
-      and(
-        eq(ruleLibraryChunks.category, category),
-        axis === null ? sql`${ruleLibraryChunks.axis} IS NULL` : eq(ruleLibraryChunks.axis, axis),
-        eq(ruleLibraryChunks.valueKey, valueKey),
-      ),
-    )
-    .limit(1);
-  return row?.content ?? null;
+  // Firestore can't filter on `null` with `==` if the field is missing;
+  // explicit `null` storage in the indexer keeps these where-clauses simple.
+  const snap = await firestore
+    .collection(COL.ruleLibraryChunks)
+    .where("category", "==", category)
+    .where("axis", "==", axis)
+    .where("valueKey", "==", valueKey)
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  const data = snap.docs[0]?.data();
+  const content = data?.content;
+  return typeof content === "string" ? content : null;
 }
 
 export async function getDnaGuidance(
-  db: Db,
+  firestore: Firestore,
   axis: keyof DNAScales,
   value: number,
 ): Promise<string | null> {
@@ -60,23 +60,29 @@ export async function getDnaGuidance(
   // value is still narrated faithfully in Block 1; the guidance is
   // interpretive.
   const snap = value <= 2 ? "1" : value >= 8 ? "10" : "5";
-  return lookupContent(db, "dna", axis, snap);
+  return lookupContent(firestore, "dna", axis, snap);
 }
 
 export async function getCompositionGuidance(
-  db: Db,
+  firestore: Firestore,
   axis: keyof Composition,
   valueKey: string,
 ): Promise<string | null> {
-  return lookupContent(db, "composition", axis, valueKey);
+  return lookupContent(firestore, "composition", axis, valueKey);
 }
 
-export async function getPowerTierGuidance(db: Db, tier: string): Promise<string | null> {
-  return lookupContent(db, "power_tier", null, tier);
+export async function getPowerTierGuidance(
+  firestore: Firestore,
+  tier: string,
+): Promise<string | null> {
+  return lookupContent(firestore, "power_tier", null, tier);
 }
 
-export async function getArchetypeGuidance(db: Db, archetype: string): Promise<string | null> {
-  return lookupContent(db, "archetype", null, archetype);
+export async function getArchetypeGuidance(
+  firestore: Firestore,
+  archetype: string,
+): Promise<string | null> {
+  return lookupContent(firestore, "archetype", null, archetype);
 }
 
 /**
@@ -86,8 +92,11 @@ export async function getArchetypeGuidance(db: Db, archetype: string): Promise<s
  * narrate that phase (setup orients, complication destabilizes, etc.).
  * Phase 7 polish — MINOR #18.
  */
-export async function getBeatCraftGuidance(db: Db, arcPhase: string): Promise<string | null> {
-  return lookupContent(db, "beat_craft", null, arcPhase);
+export async function getBeatCraftGuidance(
+  firestore: Firestore,
+  arcPhase: string,
+): Promise<string | null> {
+  return lookupContent(firestore, "beat_craft", null, arcPhase);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,14 +112,19 @@ interface SessionBundleInput {
 }
 
 /**
- * Pull all rule-library chunks relevant to THIS session in four batched
+ * Pull all rule-library chunks relevant to THIS session in batched
  * queries (one per category: dna, composition, power_tier, archetype),
  * then assemble a Markdown bundle KA reads at session start. Missing
  * content degrades gracefully — an axis with no chunk for its current
  * value simply omits that axis's line. The bundle never errors.
+ *
+ * Firestore note: there's no `IN (...)` over arbitrary tuple lookups.
+ * For the per-axis DNA/composition pass we pull every entry of the
+ * category once and filter in memory — the rule library is a small
+ * fixed corpus (low hundreds of docs) so the over-fetch is cheap.
  */
 export async function assembleSessionRuleLibraryGuidance(
-  db: Db,
+  firestore: Firestore,
   input: SessionBundleInput,
 ): Promise<string> {
   const activeDna = input.activeDna ?? input.profile.canonical_dna;
@@ -123,7 +137,7 @@ export async function assembleSessionRuleLibraryGuidance(
     const snap = value <= 2 ? "1" : value >= 8 ? "10" : "5";
     return { axis: axis as string, valueKey: snap };
   });
-  const dnaRows = await fetchBatch(db, "dna", dnaLookups);
+  const dnaRows = await fetchBatch(firestore, "dna");
   const dnaSection = renderSection(
     "DNA axes — tonal pressures for this campaign",
     dnaAxes.map((axis) => {
@@ -139,11 +153,7 @@ export async function assembleSessionRuleLibraryGuidance(
 
   // --- Composition section ---
   const compositionAxes = Object.keys(activeComposition) as Array<keyof Composition>;
-  const compositionLookups = compositionAxes.map((axis) => ({
-    axis: axis as string,
-    valueKey: String(activeComposition[axis]),
-  }));
-  const compositionRows = await fetchBatch(db, "composition", compositionLookups);
+  const compositionRows = await fetchBatch(firestore, "composition");
   const compositionSection = renderSection(
     "Composition — narrative framing for this campaign",
     compositionAxes.map((axis) => {
@@ -160,30 +170,17 @@ export async function assembleSessionRuleLibraryGuidance(
   // --- Power tier section (character + in-play NPCs for context) ---
   const tierKeys = new Set<string>();
   if (input.characterPowerTier) tierKeys.add(input.characterPowerTier);
-  const npcTiers = await db
-    .select({ powerTier: npcs.powerTier })
-    .from(npcs)
-    .where(eq(npcs.campaignId, input.campaignId))
-    .limit(100);
-  for (const r of npcTiers) {
-    if (r.powerTier) tierKeys.add(r.powerTier);
+  const npcsSnap = await firestore
+    .collection(COL.campaigns)
+    .doc(input.campaignId)
+    .collection(CAMPAIGN_SUB.npcs)
+    .limit(100)
+    .get();
+  for (const d of npcsSnap.docs) {
+    const tier = d.data().powerTier;
+    if (typeof tier === "string" && tier.length > 0) tierKeys.add(tier);
   }
-  const tierRows =
-    tierKeys.size === 0
-      ? []
-      : await db
-          .select({
-            valueKey: ruleLibraryChunks.valueKey,
-            content: ruleLibraryChunks.content,
-          })
-          .from(ruleLibraryChunks)
-          .where(
-            and(
-              eq(ruleLibraryChunks.category, "power_tier"),
-              inArray(ruleLibraryChunks.valueKey, [...tierKeys]),
-            ),
-          )
-          .limit(50);
+  const tierRows = tierKeys.size === 0 ? [] : await fetchBatch(firestore, "power_tier");
   const tierSection = renderSection(
     "Power tiers in play",
     [...tierKeys].map((tier) => {
@@ -195,30 +192,11 @@ export async function assembleSessionRuleLibraryGuidance(
 
   // --- Ensemble archetypes section (from NPC catalog, if any) ---
   const archetypes = new Set<string>();
-  const npcArchetypeRows = await db
-    .select({ ensembleArchetype: npcs.ensembleArchetype })
-    .from(npcs)
-    .where(eq(npcs.campaignId, input.campaignId))
-    .limit(100);
-  for (const r of npcArchetypeRows) {
-    if (r.ensembleArchetype) archetypes.add(r.ensembleArchetype);
+  for (const d of npcsSnap.docs) {
+    const arche = d.data().ensembleArchetype;
+    if (typeof arche === "string" && arche.length > 0) archetypes.add(arche);
   }
-  const archetypeRows =
-    archetypes.size === 0
-      ? []
-      : await db
-          .select({
-            valueKey: ruleLibraryChunks.valueKey,
-            content: ruleLibraryChunks.content,
-          })
-          .from(ruleLibraryChunks)
-          .where(
-            and(
-              eq(ruleLibraryChunks.category, "archetype"),
-              inArray(ruleLibraryChunks.valueKey, [...archetypes]),
-            ),
-          )
-          .limit(50);
+  const archetypeRows = archetypes.size === 0 ? [] : await fetchBatch(firestore, "archetype");
   const archetypeSection = renderSection(
     "Ensemble archetypes in play",
     [...archetypes].map((arch) => {
@@ -234,32 +212,29 @@ export async function assembleSessionRuleLibraryGuidance(
   return sections.join("\n\n---\n\n");
 }
 
+/**
+ * Pull every chunk in a category. The rule library is a small fixed
+ * corpus (low hundreds of docs across all categories), so the
+ * over-fetch in exchange for a single round-trip per category is
+ * cheap. Bounded at 500.
+ */
 async function fetchBatch(
-  db: Db,
+  firestore: Firestore,
   category: string,
-  lookups: Array<{ axis: string; valueKey: string }>,
 ): Promise<Array<{ axis: string | null; valueKey: string | null; content: string }>> {
-  if (lookups.length === 0) return [];
-  const axes = [...new Set(lookups.map((l) => l.axis))];
-  const values = [...new Set(lookups.map((l) => l.valueKey))];
-  // Bounded at 500 — max 24 axes × ~10 values + slack; real queries are
-  // always well under. The explicit limit also keeps test fake-DBs simple
-  // (they only need to implement the chain through .limit()).
-  return db
-    .select({
-      axis: ruleLibraryChunks.axis,
-      valueKey: ruleLibraryChunks.valueKey,
-      content: ruleLibraryChunks.content,
-    })
-    .from(ruleLibraryChunks)
-    .where(
-      and(
-        eq(ruleLibraryChunks.category, category),
-        inArray(ruleLibraryChunks.axis, axes),
-        inArray(ruleLibraryChunks.valueKey, values),
-      ),
-    )
-    .limit(500);
+  const snap = await firestore
+    .collection(COL.ruleLibraryChunks)
+    .where("category", "==", category)
+    .limit(500)
+    .get();
+  return snap.docs.map((d) => {
+    const r = d.data();
+    return {
+      axis: typeof r.axis === "string" ? r.axis : null,
+      valueKey: typeof r.valueKey === "string" ? r.valueKey : null,
+      content: typeof r.content === "string" ? r.content : "",
+    };
+  });
 }
 
 function renderSection(

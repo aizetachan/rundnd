@@ -220,9 +220,6 @@ function makeCtx(firestore: AidmToolContext["firestore"]): AidmToolContext {
   return {
     campaignId: CAMPAIGN,
     userId: "u-1",
-    // db is unused by every chronicler tool now; pass an empty object cast
-    // for type compatibility. Auth runs through the firestore branch.
-    db: {} as AidmToolContext["db"],
     firestore,
   };
 }
