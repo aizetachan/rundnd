@@ -3,8 +3,11 @@
 # Reference: https://firebase.google.com/docs/app-hosting/configure
 # - `runConfig` controls the Cloud Run service (memory, concurrency).
 # - `env` exposes plain env vars + references to Secret Manager.
-# - Secrets must be created via `firebase apphosting:secrets:set <NAME>`
-#   and granted to the backend before they resolve at deploy time.
+# - Secrets must exist in Secret Manager BEFORE deploy. If a secret
+#   listed here doesn't exist, the build fails. Add new providers
+#   (Google, OpenAI, OpenRouter, Algolia, Langfuse, PostHog) by
+#   appending entries here AFTER `firebase apphosting:secrets:set`
+#   has created them.
 
 runConfig:
   cpu: 1
@@ -70,65 +73,10 @@ env:
     availability:
       - RUNTIME
 
-  # --- LLM provider keys (Secret Manager) ---
+  # --- LLM provider (only Anthropic is required for the game to play) ---
+  # If/when you add Google/OpenAI/OpenRouter, append entries below after
+  # creating their secrets in Secret Manager.
   - variable: ANTHROPIC_API_KEY
     secret: ANTHROPIC_API_KEY
     availability:
-      - RUNTIME
-  - variable: GOOGLE_API_KEY
-    secret: GOOGLE_API_KEY
-    availability:
-      - RUNTIME
-  - variable: OPENAI_API_KEY
-    secret: OPENAI_API_KEY
-    availability:
-      - RUNTIME
-  - variable: OPENROUTER_API_KEY
-    secret: OPENROUTER_API_KEY
-    availability:
-      - RUNTIME
-
-  # --- Observability (Secret Manager) ---
-  - variable: LANGFUSE_PUBLIC_KEY
-    secret: LANGFUSE_PUBLIC_KEY
-    availability:
-      - RUNTIME
-  - variable: LANGFUSE_SECRET_KEY
-    secret: LANGFUSE_SECRET_KEY
-    availability:
-      - RUNTIME
-  - variable: LANGFUSE_HOST
-    value: "https://us.cloud.langfuse.com"
-    availability:
-      - RUNTIME
-
-  - variable: NEXT_PUBLIC_POSTHOG_KEY
-    secret: NEXT_PUBLIC_POSTHOG_KEY
-    availability:
-      - BUILD
-      - RUNTIME
-  - variable: NEXT_PUBLIC_POSTHOG_HOST
-    value: "https://us.i.posthog.com"
-    availability:
-      - BUILD
-      - RUNTIME
-
-  # --- Algolia (Fase 4 — fill once the index exists) ---
-  - variable: ALGOLIA_APP_ID
-    secret: ALGOLIA_APP_ID
-    availability:
-      - RUNTIME
-  - variable: ALGOLIA_ADMIN_KEY
-    secret: ALGOLIA_ADMIN_KEY
-    availability:
-      - RUNTIME
-  - variable: NEXT_PUBLIC_ALGOLIA_APP_ID
-    secret: NEXT_PUBLIC_ALGOLIA_APP_ID
-    availability:
-      - BUILD
-      - RUNTIME
-  - variable: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
-    secret: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
-    availability:
-      - BUILD
       - RUNTIME
