@@ -1,18 +1,17 @@
-import { type Table, getTableName } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import type { AidmToolContext } from "../../index";
 
 /**
- * Per-tool unit tests for the 13 Chronicler write tools. Covers:
+ * Per-tool unit tests for the Chronicler write tools. Covers:
  *   - Zod input schema catches malformed args
- *   - execute() issues the right DB action (insert/update/select) with
- *     the expected values
- *   - Zod output schema catches malformed returns from the DB layer
+ *   - execute() issues the right Firestore actions (set / add / update,
+ *     including the transaction variants) with the expected values
+ *   - Zod output schema catches malformed returns from the data layer
  *
- * We don't exercise real Postgres here — registry auth + span wrapping
+ * We don't exercise real Firestore here — registry auth + span wrapping
  * are covered by `src/lib/tools/__tests__/registry.test.ts`, and the
- * real DB round-trip is exercised by the turn-pipeline integration at
- * Commit 7.4 when Chronicler is wired via `after()`.
+ * real DB round-trip is exercised by the turn-pipeline integration when
+ * Chronicler is wired via `after()`.
  *
  * NOTE: `tests/setup.ts` runs `vi.resetModules()` in `beforeEach`, so we
  * dynamic-import the registry per test. A top-level `import { invokeTool }`
@@ -24,118 +23,208 @@ const UUID = "11111111-1111-4111-8111-111111111111";
 const CAMPAIGN = "22222222-2222-4222-9222-222222222222";
 const NPC_ID = "33333333-3333-4333-8333-333333333333";
 
-interface Captured {
-  inserts: Array<{ table: string; values: unknown }>;
-  updates: Array<{ table: string; patch: unknown }>;
-  conflictTargets: unknown[];
+interface CapturedWrites {
+  sets: Array<{ path: string; data: Record<string, unknown>; merge: boolean }>;
+  updates: Array<{ path: string; data: Record<string, unknown> }>;
+  adds: Array<{ path: string; data: Record<string, unknown> }>;
+  transactionRuns: number;
+}
+
+interface FakeOpts {
+  /** When `null`, the campaign doc does not exist (auth fails). When omitted, defaults to a valid campaign owned by `u-1`. */
+  campaign?: { ownerUid?: string; settings?: unknown; deletedAt?: Date | null } | null;
+  /**
+   * Pre-existing docs in subcollections, keyed by subcollection name.
+   * Each entry's `id` is the doc id (used by `.doc(id).get()`); `data` is
+   * what `.data()` returns for both single-doc reads and query results.
+   */
+  subcollectionDocs?: Record<string, Array<{ id: string; data: Record<string, unknown> }>>;
 }
 
 async function freshRegistry() {
   return await import("../../index");
 }
 
-function fakeDb(
-  captured: Captured,
-  opts: {
-    authRow?: Record<string, unknown>;
-    selectQueueAfterAuth?: unknown[][];
-    insertReturning?: unknown[];
-    updateReturning?: unknown[];
-  } = {},
-): AidmToolContext["db"] {
-  const authRow = opts.authRow ?? {
-    id: CAMPAIGN,
-    userId: "u-1",
-    name: "test",
-    settings: {},
-  };
-  const queue = opts.selectQueueAfterAuth ?? [];
+function makeCaptured(): CapturedWrites {
+  return { sets: [], updates: [], adds: [], transactionRuns: 0 };
+}
 
-  let selectCall = 0;
-  const resolveSelect = async () => {
-    // First select hits authorizeCampaignAccess.
-    if (selectCall === 0) {
-      selectCall += 1;
-      return [authRow];
-    }
-    const next = queue[selectCall - 1] ?? [];
-    selectCall += 1;
-    return next;
-  };
-
-  const tableNameOf = (t: unknown): string => {
-    try {
-      return getTableName(t as Table);
-    } catch {
-      return "unknown";
-    }
-  };
-
-  // Drizzle query builders are thenables — you can `await` them at any
-  // step past `.from()`. Our fake mirrors that: every chain method
-  // returns an object that *also* acts as a Promise resolving to the
-  // canned select rows. Multi-level chains like
-  // `select().from().where().orderBy()` await-resolve without a
-  // trailing `.limit()`.
-  const makeSelectChain = (): Record<string, unknown> => {
-    const chain: Record<string, unknown> = {};
-    const settle = () => resolveSelect();
-    // Intentional `then` property — this fake mimics Drizzle's query
-    // builder, which is itself a thenable. Biome's noThenProperty is
-    // about preventing accidental Promise-like objects; here we want
-    // the thenable behavior.
-    // biome-ignore lint/suspicious/noThenProperty: fake mirrors Drizzle's thenable builder
-    chain.then = (resolve: (rows: unknown[]) => unknown, reject?: (err: unknown) => unknown) =>
-      settle().then(resolve, reject);
-    chain.catch = (reject: (err: unknown) => unknown) => settle().catch(reject);
-    chain.finally = (cb: () => void) => settle().finally(cb);
-    chain.from = () => chain;
-    chain.where = () => chain;
-    chain.orderBy = () => chain;
-    chain.limit = () => chain;
-    return chain;
-  };
-
-  const makeInsertChain = (tableName: string) => ({
-    values: (v: unknown) => {
-      captured.inserts.push({ table: tableName, values: v });
-      const returning = async () => opts.insertReturning ?? [];
-      return {
-        returning,
-        onConflictDoNothing: (args?: unknown) => {
-          if (args) captured.conflictTargets.push({ kind: "doNothing", args });
-          return { returning };
-        },
-        onConflictDoUpdate: (args?: unknown) => {
-          if (args) captured.conflictTargets.push({ kind: "doUpdate", args });
-          return { returning };
-        },
+/**
+ * Build a fake Firestore that:
+ *   - Returns the campaign doc for `authorizeCampaignAccess` (top-level
+ *     `campaigns/{id}` read).
+ *   - Returns pre-seeded docs in subcollections via `.doc(id).get()` and
+ *     query chains (`.where().orderBy().limit().get()`).
+ *   - Captures `.set`, `.update`, `.add` (including those issued inside
+ *     a `runTransaction(callback)`).
+ *   - Supports atomic ops by storing whatever sentinel `FieldValue.*`
+ *     returns; tests assert via the captured payload, not the resolved
+ *     post-increment value (with the exception of adjust_spotlight_debt
+ *     which reads after write — covered with a per-test seed).
+ */
+function makeFakeFirestore(
+  captured: CapturedWrites,
+  opts: FakeOpts = {},
+): AidmToolContext["firestore"] {
+  const campaignMissing = opts.campaign === null;
+  const campaignData = campaignMissing
+    ? undefined
+    : {
+        ownerUid: opts.campaign?.ownerUid ?? "u-1",
+        deletedAt: opts.campaign?.deletedAt ?? null,
+        name: "test",
+        settings: opts.campaign?.settings ?? {},
+        phase: "playing",
+        profileRefs: [],
+        createdAt: new Date(),
       };
-    },
-  });
+
+  const subDocs = opts.subcollectionDocs ?? {};
+
+  /**
+   * Build a doc ref under a campaign subcollection. The path string is what
+   * captured writes assert against (e.g. `campaigns/<id>/npcs/<docId>`).
+   */
+  function makeSubDocRef(subcollectionName: string, docId: string) {
+    const path = `campaigns/${CAMPAIGN}/${subcollectionName}/${docId}`;
+    const seeded = subDocs[subcollectionName]?.find((d) => d.id === docId);
+    const ref = {
+      id: docId,
+      path,
+      get: async () => ({
+        id: docId,
+        exists: seeded !== undefined,
+        data: () => seeded?.data,
+      }),
+      set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
+        captured.sets.push({ path, data, merge: options?.merge ?? false });
+      },
+      update: async (data: Record<string, unknown>) => {
+        captured.updates.push({ path, data });
+      },
+      collection: () => makeSubcollection("__nested__"),
+    };
+    return ref;
+  }
+
+  /**
+   * Build a subcollection handle under `campaigns/{CAMPAIGN}/<name>`.
+   * Supports doc lookups, query chains, add(), and count().
+   */
+  function makeSubcollection(name: string) {
+    const seededDocs = subDocs[name] ?? [];
+    const queryDocs = seededDocs.map((d) => ({
+      id: d.id,
+      data: () => d.data,
+      ref: makeSubDocRef(name, d.id),
+    }));
+
+    // Build a query chain that honors `.limit(n)` — trigger_compactor
+    // relies on it to cap the oldest-N fetch. Order/where filters are
+    // not enforced (tests don't depend on filter semantics; they seed
+    // exactly the rows they expect to read), but limit truncates the
+    // result set so the slice the tool returns matches expectations.
+    function makeQuery(currentLimit: number | null): Record<string, unknown> {
+      const q: Record<string, unknown> = {
+        where: () => makeQuery(currentLimit),
+        orderBy: () => makeQuery(currentLimit),
+        limit: (n: number) => makeQuery(n),
+        get: async () => {
+          const sliced = currentLimit === null ? queryDocs : queryDocs.slice(0, currentLimit);
+          return { empty: sliced.length === 0, docs: sliced };
+        },
+        count: () => ({
+          get: async () => ({ data: () => ({ count: queryDocs.length }) }),
+        }),
+      };
+      return q;
+    }
+    const queryShape = makeQuery(null);
+
+    return {
+      ...queryShape,
+      doc: (docId: string) => makeSubDocRef(name, docId),
+      add: async (data: Record<string, unknown>) => {
+        const path = `campaigns/${CAMPAIGN}/${name}`;
+        captured.adds.push({ path, data });
+        const newId = `${name}-new-${captured.adds.length}`;
+        return makeSubDocRef(name, newId);
+      },
+    };
+  }
+
+  const campaignDocRef = {
+    id: CAMPAIGN,
+    path: `campaigns/${CAMPAIGN}`,
+    get: async () => ({
+      id: CAMPAIGN,
+      exists: !campaignMissing,
+      data: () => campaignData,
+    }),
+    collection: (sub: string) => makeSubcollection(sub),
+  };
+
+  /**
+   * Transaction emulator: tx.get/.set/.update route through the same
+   * ref bookkeeping as the non-tx path. Tests don't distinguish — set
+   * inside a transaction shows up in `captured.sets` like any other.
+   */
+  async function runTransaction<T>(
+    callback: (tx: {
+      get: (ref: { get: () => Promise<unknown> }) => Promise<unknown>;
+      set: (
+        ref: { path: string },
+        data: Record<string, unknown>,
+        options?: { merge?: boolean },
+      ) => void;
+      update: (ref: { path: string }, data: Record<string, unknown>) => void;
+    }) => Promise<T>,
+  ): Promise<T> {
+    captured.transactionRuns += 1;
+    const tx = {
+      get: async (ref: { get: () => Promise<unknown> }) => ref.get(),
+      set: (
+        ref: { path: string },
+        data: Record<string, unknown>,
+        options?: { merge?: boolean },
+      ) => {
+        captured.sets.push({ path: ref.path, data, merge: options?.merge ?? false });
+      },
+      update: (ref: { path: string }, data: Record<string, unknown>) => {
+        captured.updates.push({ path: ref.path, data });
+      },
+    };
+    return await callback(tx);
+  }
 
   return {
-    select: () => makeSelectChain(),
-    insert: (table: unknown) => makeInsertChain(tableNameOf(table)),
-    update: (table: unknown) => ({
-      set: (patch: unknown) => {
-        captured.updates.push({ table: tableNameOf(table), patch });
+    collection: (name: string) => {
+      if (name === "campaigns") {
         return {
-          where: () => ({
-            returning: async () => opts.updateReturning ?? [],
-          }),
+          doc: () => campaignDocRef,
         };
-      },
-    }),
-  } as unknown as AidmToolContext["db"];
+      }
+      // Top-level non-campaign collection — none used by chronicler tools,
+      // but return an empty shape rather than crashing.
+      return {
+        doc: () => ({
+          get: async () => ({ exists: false, data: () => undefined }),
+        }),
+      };
+    },
+    runTransaction,
+  } as unknown as AidmToolContext["firestore"];
 }
 
-function makeCaptured(): Captured {
-  return { inserts: [], updates: [], conflictTargets: [] };
-}
-
-function makeCtx(db: AidmToolContext["db"]): AidmToolContext {
-  return { campaignId: CAMPAIGN, userId: "u-1", db };
+function makeCtx(firestore: AidmToolContext["firestore"]): AidmToolContext {
+  return {
+    campaignId: CAMPAIGN,
+    userId: "u-1",
+    // db is unused by every chronicler tool now; pass an empty object cast
+    // for type compatibility. Auth runs through the firestore branch.
+    db: {} as AidmToolContext["db"],
+    firestore,
+  };
 }
 
 describe("Chronicler tools", () => {
@@ -143,46 +232,57 @@ describe("Chronicler tools", () => {
     it("inserts with defaults when fields are omitted; returns created=true", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "register_npc",
         { name: "Jet Black", first_seen_turn: 1, last_seen_turn: 1 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, created: true });
-      expect(captured.inserts[0]?.table).toBe("npcs");
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
+      expect(out).toMatchObject({ created: true });
+      expect((out as { id: string }).id).toMatch(/.+/);
+      // The set landed in the npcs subcollection within a transaction.
+      expect(captured.transactionRuns).toBe(1);
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.path).toMatch(/\/npcs\//);
+      const v = set.data;
       expect(v.campaignId).toBe(CAMPAIGN);
       expect(v.name).toBe("Jet Black");
       expect(v.role).toBe("acquaintance");
       expect(v.powerTier).toBe("T10");
+      expect(v.isTransient).toBe(false);
       expect(v.goals).toEqual([]);
       expect(v.knowledgeTopics).toEqual({});
     });
 
-    it("returns created=false + existing id on unique-conflict", async () => {
+    it("returns created=false + existing id on unique-conflict (doc already exists)", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        insertReturning: [],
-        selectQueueAfterAuth: [[{ id: UUID }]],
+      // Pre-seed an NPC at the deterministic doc id `safeNameId("Jet Black")`
+      // = "jet-black".
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: { npcs: [{ id: "jet-black", data: { name: "Jet Black" } }] },
       });
       const out = await mod.invokeTool(
         "register_npc",
         { name: "Jet Black", first_seen_turn: 1, last_seen_turn: 1 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, created: false });
+      expect(out).toMatchObject({ created: false });
+      expect((out as { id: string }).id).toBe("jet-black");
+      // Crucially, no insert fired — the pre-seeded doc was respected.
+      expect(captured.sets).toHaveLength(0);
     });
 
     it("rejects empty name (Zod)", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
         mod.invokeTool(
           "register_npc",
           { name: "", first_seen_turn: 1, last_seen_turn: 1 },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow();
     });
@@ -192,14 +292,21 @@ describe("Chronicler tools", () => {
     it("updates fields by id; omitted fields untouched", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { updateReturning: [{ id: NPC_ID }] });
+      // Pre-seed the target doc — update_npc reads with .get() before set.
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: { npcs: [{ id: NPC_ID, data: { name: "Jet" } }] },
+      });
       const out = await mod.invokeTool(
         "update_npc",
         { id: NPC_ID, personality: "calm, measured", last_seen_turn: 14 },
-        makeCtx(db),
+        makeCtx(fs),
       );
       expect(out).toEqual({ id: NPC_ID, updated: true });
-      const patch = captured.updates[0]?.patch as Record<string, unknown>;
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.merge).toBe(true);
+      const patch = set.data;
       expect(patch.personality).toBe("calm, measured");
       expect(patch.lastSeenTurn).toBe(14);
       expect(patch).toHaveProperty("updatedAt");
@@ -208,15 +315,16 @@ describe("Chronicler tools", () => {
 
     it("requires id or name (Zod refinement)", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
-      await expect(mod.invokeTool("update_npc", { role: "ally" }, makeCtx(db))).rejects.toThrow();
+      const fs = makeFakeFirestore(makeCaptured(), {});
+      await expect(mod.invokeTool("update_npc", { role: "ally" }, makeCtx(fs))).rejects.toThrow();
     });
 
     it("throws when no row matched", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured(), { updateReturning: [] });
+      // No NPC seeded — .get() returns exists:false, tool throws.
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
-        mod.invokeTool("update_npc", { id: NPC_ID, role: "ally" }, makeCtx(db)),
+        mod.invokeTool("update_npc", { id: NPC_ID, role: "ally" }, makeCtx(fs)),
       ).rejects.toThrow(/no NPC found/i);
     });
   });
@@ -225,30 +333,36 @@ describe("Chronicler tools", () => {
     it("register_location inserts with default details + created=true", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "register_location",
         { name: "The Bebop", first_seen_turn: 1, last_seen_turn: 1 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, created: true });
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
-      expect(v.details).toEqual({});
+      expect(out).toMatchObject({ created: true });
+      expect((out as { id: string }).id).toMatch(/.+/);
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.path).toMatch(/\/locations\//);
+      expect(set.data.details).toEqual({});
     });
 
     it("register_faction no-ops on conflict and returns existing id", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        insertReturning: [],
-        selectQueueAfterAuth: [[{ id: UUID }]],
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: {
+          factions: [{ id: "red-dragon-syndicate", data: { name: "Red Dragon Syndicate" } }],
+        },
       });
       const out = await mod.invokeTool(
         "register_faction",
         { name: "Red Dragon Syndicate" },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, created: false });
+      expect(out).toEqual({ id: "red-dragon-syndicate", created: false });
+      expect(captured.sets).toHaveLength(0);
     });
   });
 
@@ -256,10 +370,9 @@ describe("Chronicler tools", () => {
     it("appends with npc_id + milestone_type + evidence + turn_number", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        insertReturning: [{ id: UUID }],
-        // selectQueueAfterAuth[0] = NPC guard (must find row)
-        selectQueueAfterAuth: [[{ id: NPC_ID }]],
+      // NPC guard reads npcs/{NPC_ID}.get() — must find the doc.
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: { npcs: [{ id: NPC_ID, data: { name: "Jet" } }] },
       });
       const out = await mod.invokeTool(
         "record_relationship_event",
@@ -269,10 +382,14 @@ describe("Chronicler tools", () => {
           evidence: "Jet let Spike see the photo of his ex.",
           turn_number: 12,
         },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID });
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
+      expect((out as { id: string }).id).toMatch(/.+/);
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.path).toMatch(/\/relationshipEvents$/);
+      const v = add.data;
       expect(v.campaignId).toBe(CAMPAIGN);
       expect(v.npcId).toBe(NPC_ID);
       expect(v.milestoneType).toBe("first_vulnerability");
@@ -281,12 +398,12 @@ describe("Chronicler tools", () => {
 
     it("rejects empty milestone_type", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
         mod.invokeTool(
           "record_relationship_event",
           { npc_id: NPC_ID, milestone_type: "", evidence: "x", turn_number: 1 },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow();
     });
@@ -294,8 +411,8 @@ describe("Chronicler tools", () => {
     it("cross-campaign FK guard: rejects npc_id that belongs to another campaign", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      // NPC guard select returns empty → guard throws before insert
-      const db = fakeDb(captured, { selectQueueAfterAuth: [[]] });
+      // No npc seeded → guard's .get() returns exists:false → throw.
+      const fs = makeFakeFirestore(captured, {});
       await expect(
         mod.invokeTool(
           "record_relationship_event",
@@ -305,10 +422,10 @@ describe("Chronicler tools", () => {
             evidence: "x",
             turn_number: 1,
           },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow(/not found in this campaign/i);
-      expect(captured.inserts).toHaveLength(0); // insert never fired
+      expect(captured.adds).toHaveLength(0);
     });
   });
 
@@ -316,22 +433,25 @@ describe("Chronicler tools", () => {
     it("inserts with default heat 100 (Phase 4 v3-parity: start hot, let decay do the work)", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       await mod.invokeTool(
         "write_semantic_memory",
         { category: "relationship", content: "Spike owes Jet gas money.", turn_number: 8 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      const v = add.data;
       expect(v.heat).toBe(100);
-      expect("embedding" in v).toBe(false); // null by column default
+      expect(v.embedding).toBeNull(); // explicit null in the write
       expect(v.flags).toEqual({}); // default empty when not provided
     });
 
     it("persists flags (plot_critical bypasses decay)", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       await mod.invokeTool(
         "write_semantic_memory",
         {
@@ -340,20 +460,21 @@ describe("Chronicler tools", () => {
           turn_number: 1,
           flags: { plot_critical: true },
         },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
-      expect(v.flags).toEqual({ plot_critical: true });
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.data.flags).toEqual({ plot_critical: true });
     });
 
     it("clamps heat to [0, 100]", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
         mod.invokeTool(
           "write_semantic_memory",
           { category: "x", content: "x", heat: 150, turn_number: 1 },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow();
     });
@@ -363,22 +484,29 @@ describe("Chronicler tools", () => {
     it("updates turns.summary by campaign + turn_number", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { updateReturning: [{ turnNumber: 5 }] });
+      // Seed a turn doc whose where(turnNumber == 5) query will resolve.
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: { turns: [{ id: "turn-5", data: { turnNumber: 5 } }] },
+      });
       const out = await mod.invokeTool(
         "write_episodic_summary",
         { turn_number: 5, summary: "Jet told the story of his ex-partner." },
-        makeCtx(db),
+        makeCtx(fs),
       );
       expect(out).toEqual({ turn_number: 5, updated: true });
-      const patch = captured.updates[0]?.patch as Record<string, unknown>;
-      expect(patch.summary).toBe("Jet told the story of his ex-partner.");
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.merge).toBe(true);
+      expect(set.data.summary).toBe("Jet told the story of his ex-partner.");
     });
 
     it("throws when the turn row does not exist", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured(), { updateReturning: [] });
+      // No turn seeded → query returns empty → tool throws.
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
-        mod.invokeTool("write_episodic_summary", { turn_number: 99, summary: "x" }, makeCtx(db)),
+        mod.invokeTool("write_episodic_summary", { turn_number: 99, summary: "x" }, makeCtx(fs)),
       ).rejects.toThrow(/no turn row/i);
     });
   });
@@ -387,7 +515,7 @@ describe("Chronicler tools", () => {
     it("inserts with status PLANTED and returns id + literal status", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "plant_foreshadowing_candidate",
         {
@@ -397,10 +525,15 @@ describe("Chronicler tools", () => {
           payoff_window_max: 20,
           planted_turn: 2,
         },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, status: "PLANTED" });
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
+      expect(out).toMatchObject({ status: "PLANTED" });
+      expect((out as { id: string }).id).toMatch(/.+/);
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.path).toMatch(/\/foreshadowingSeeds$/);
+      const v = add.data;
       expect(v.status).toBe("PLANTED");
       expect(v.dependsOn).toEqual([]);
       expect(v.conflictsWith).toEqual([]);
@@ -411,7 +544,7 @@ describe("Chronicler tools", () => {
     it("inserts real row and returns seed_id + status PLANTED", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "plant_foreshadowing_seed",
         {
@@ -421,10 +554,14 @@ describe("Chronicler tools", () => {
           payoff_window_max: 10,
           planted_turn: 4,
         },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ seed_id: UUID, status: "PLANTED" });
-      expect(captured.inserts[0]?.table).toBe("foreshadowing_seeds");
+      expect(out).toMatchObject({ status: "PLANTED" });
+      expect((out as { seed_id: string }).seed_id).toMatch(/.+/);
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.path).toMatch(/\/foreshadowingSeeds$/);
     });
   });
 
@@ -432,9 +569,7 @@ describe("Chronicler tools", () => {
     it("appends arc-plan snapshot with tension formatted to 2dp", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        insertReturning: [{ id: UUID, setAtTurn: 15 }],
-      });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "update_arc_plan",
         {
@@ -445,17 +580,21 @@ describe("Chronicler tools", () => {
           tension_level: 0.75,
           set_at_turn: 15,
         },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID, set_at_turn: 15 });
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
-      expect(v.tensionLevel).toBe("0.75");
-      expect(v.plannedBeats).toEqual(["Faye picks up a lead", "Jet warns Spike"]);
+      expect(out).toMatchObject({ set_at_turn: 15 });
+      expect((out as { id: string }).id).toMatch(/.+/);
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      // Firestore stores numbers natively now; 2dp rounded numerically.
+      expect(add.data.tensionLevel).toBe(0.75);
+      expect(add.data.plannedBeats).toEqual(["Faye picks up a lead", "Jet warns Spike"]);
     });
 
     it("rejects invalid arc_phase", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
         mod.invokeTool(
           "update_arc_plan",
@@ -466,7 +605,7 @@ describe("Chronicler tools", () => {
             tension_level: 0.5,
             set_at_turn: 1,
           },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow();
     });
@@ -476,16 +615,18 @@ describe("Chronicler tools", () => {
     it("appends a pattern row", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       const out = await mod.invokeTool(
         "update_voice_patterns",
         { pattern: "terse openings land well", turn_observed: 5 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      expect(out).toEqual({ id: UUID });
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
-      expect(v.pattern).toBe("terse openings land well");
-      expect(v.evidence).toBe(""); // default
+      expect((out as { id: string }).id).toMatch(/.+/);
+      expect(captured.adds).toHaveLength(1);
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.data.pattern).toBe("terse openings land well");
+      expect(add.data.evidence).toBe(""); // default
     });
   });
 
@@ -493,58 +634,72 @@ describe("Chronicler tools", () => {
     it("defaults scope to session", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { insertReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {});
       await mod.invokeTool(
         "write_director_note",
         { content: "Keep Faye in the frame.", created_at_turn: 3 },
-        makeCtx(db),
+        makeCtx(fs),
       );
-      const v = captured.inserts[0]?.values as Record<string, unknown>;
-      expect(v.scope).toBe("session");
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.data.scope).toBe("session");
     });
 
     it("rejects invalid scope", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured());
+      const fs = makeFakeFirestore(makeCaptured(), {});
       await expect(
         mod.invokeTool(
           "write_director_note",
           { content: "x", scope: "bogus", created_at_turn: 1 },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow();
     });
   });
 
   describe("adjust_spotlight_debt", () => {
-    it("upserts on (campaign, npc) with SQL-expression delta", async () => {
+    it("upserts on (campaign, npc) with FieldValue.increment delta", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        insertReturning: [{ npcId: NPC_ID, debt: -3 }],
-        selectQueueAfterAuth: [[{ id: NPC_ID }]], // NPC guard passes
+      // NPC guard must find the NPC; spotlightDebt seeded with debt=-3 so the
+      // tool's read-after-write returns -3 (matches the test's expected value).
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: {
+          npcs: [{ id: NPC_ID, data: { name: "Jet" } }],
+          spotlightDebt: [{ id: NPC_ID, data: { debt: -3 } }],
+        },
       });
       const out = await mod.invokeTool(
         "adjust_spotlight_debt",
         { npc_id: NPC_ID, delta: -1, updated_at_turn: 10 },
-        makeCtx(db),
+        makeCtx(fs),
       );
       expect(out).toEqual({ npc_id: NPC_ID, debt: -3 });
-      expect(captured.conflictTargets[0]).toMatchObject({ kind: "doUpdate" });
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.merge).toBe(true);
+      expect(set.path).toMatch(/\/spotlightDebt\//);
+      // The increment sentinel travels through as a FieldValue object.
+      expect(set.data.npcId).toBe(NPC_ID);
+      expect(set.data.updatedAtTurn).toBe(10);
+      expect(set.data).toHaveProperty("debt");
     });
 
     it("cross-campaign FK guard: rejects npc_id from another campaign", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { selectQueueAfterAuth: [[]] });
+      // No npcs seeded → guard's .get() returns exists:false → throw.
+      const fs = makeFakeFirestore(captured, {});
       await expect(
         mod.invokeTool(
           "adjust_spotlight_debt",
           { npc_id: NPC_ID, delta: 1, updated_at_turn: 5 },
-          makeCtx(db),
+          makeCtx(fs),
         ),
       ).rejects.toThrow(/not found in this campaign/i);
-      expect(captured.inserts).toHaveLength(0);
+      expect(captured.sets).toHaveLength(0);
     });
   });
 
@@ -552,19 +707,35 @@ describe("Chronicler tools", () => {
     it("transitions PLANTED → GROWING and returns status GROWING", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { updateReturning: [{ id: UUID }] });
-      const out = await mod.invokeTool("ratify_foreshadowing_seed", { seed_id: UUID }, makeCtx(db));
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: {
+          foreshadowingSeeds: [{ id: UUID, data: { status: "PLANTED" } }],
+        },
+      });
+      const out = await mod.invokeTool(
+        "ratify_foreshadowing_seed",
+        { seed_id: UUID },
+        makeCtx(fs),
+      );
       expect(out).toEqual({ seed_id: UUID, status: "GROWING" });
-      const patch = captured.updates[0]?.patch as Record<string, unknown>;
-      expect(patch.status).toBe("GROWING");
-      expect(patch).toHaveProperty("updatedAt");
+      expect(captured.sets).toHaveLength(1);
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.merge).toBe(true);
+      expect(set.data.status).toBe("GROWING");
+      expect(set.data).toHaveProperty("updatedAt");
     });
 
     it("throws when seed isn't in PLANTED state (no row matched)", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured(), { updateReturning: [] });
+      // Seed exists but isn't PLANTED → the status guard throws.
+      const fs = makeFakeFirestore(makeCaptured(), {
+        subcollectionDocs: {
+          foreshadowingSeeds: [{ id: UUID, data: { status: "GROWING" } }],
+        },
+      });
       await expect(
-        mod.invokeTool("ratify_foreshadowing_seed", { seed_id: UUID }, makeCtx(db)),
+        mod.invokeTool("ratify_foreshadowing_seed", { seed_id: UUID }, makeCtx(fs)),
       ).rejects.toThrow(/no PLANTED seed/i);
     });
   });
@@ -573,22 +744,32 @@ describe("Chronicler tools", () => {
     it("transitions active seed → ABANDONED", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, { updateReturning: [{ id: UUID }] });
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: {
+          foreshadowingSeeds: [{ id: UUID, data: { status: "GROWING" } }],
+        },
+      });
       const out = await mod.invokeTool(
         "retire_foreshadowing_seed",
         { seed_id: UUID, reason: "Plot moved past it" },
-        makeCtx(db),
+        makeCtx(fs),
       );
       expect(out).toEqual({ seed_id: UUID, status: "ABANDONED" });
-      const patch = captured.updates[0]?.patch as Record<string, unknown>;
-      expect(patch.status).toBe("ABANDONED");
+      const set = captured.sets[0];
+      if (!set) throw new Error("expected one set");
+      expect(set.data.status).toBe("ABANDONED");
     });
 
     it("throws when seed is already terminal (no active row matched)", async () => {
       const mod = await freshRegistry();
-      const db = fakeDb(makeCaptured(), { updateReturning: [] });
+      // Seed exists but is RESOLVED (terminal) → tool throws.
+      const fs = makeFakeFirestore(makeCaptured(), {
+        subcollectionDocs: {
+          foreshadowingSeeds: [{ id: UUID, data: { status: "RESOLVED" } }],
+        },
+      });
       await expect(
-        mod.invokeTool("retire_foreshadowing_seed", { seed_id: UUID }, makeCtx(db)),
+        mod.invokeTool("retire_foreshadowing_seed", { seed_id: UUID }, makeCtx(fs)),
       ).rejects.toThrow(/no active seed/i);
     });
   });
@@ -597,16 +778,16 @@ describe("Chronicler tools", () => {
     it("returns turn_count + should_compact=false + empty oldest when below threshold", async () => {
       const mod = await freshRegistry();
       const captured = makeCaptured();
-      const db = fakeDb(captured, {
-        selectQueueAfterAuth: [
-          [
-            { turnNumber: 1, narrativeText: "scene 1", summary: "s1" },
-            { turnNumber: 2, narrativeText: "scene 2", summary: null },
-            { turnNumber: 3, narrativeText: "scene 3", summary: null },
+      const fs = makeFakeFirestore(captured, {
+        subcollectionDocs: {
+          turns: [
+            { id: "t-1", data: { turnNumber: 1, narrativeText: "scene 1", summary: "s1" } },
+            { id: "t-2", data: { turnNumber: 2, narrativeText: "scene 2", summary: null } },
+            { id: "t-3", data: { turnNumber: 3, narrativeText: "scene 3", summary: null } },
           ],
-        ],
+        },
       });
-      const out = await mod.invokeTool("trigger_compactor", {}, makeCtx(db));
+      const out = await mod.invokeTool("trigger_compactor", {}, makeCtx(fs));
       expect(out).toMatchObject({
         turn_count: 3,
         threshold: 20,
@@ -617,19 +798,24 @@ describe("Chronicler tools", () => {
 
     it("returns oldest N turn narratives when above threshold", async () => {
       const mod = await freshRegistry();
-      const rows = Array.from({ length: 25 }, (_, i) => ({
-        turnNumber: i + 1,
-        narrativeText: `scene ${i + 1}`,
-        summary: i % 2 === 0 ? `s${i + 1}` : null,
+      const turns = Array.from({ length: 25 }, (_, i) => ({
+        id: `t-${i + 1}`,
+        data: {
+          turnNumber: i + 1,
+          narrativeText: `scene ${i + 1}`,
+          summary: i % 2 === 0 ? `s${i + 1}` : null,
+        },
       }));
       const captured = makeCaptured();
-      const db = fakeDb(captured, { selectQueueAfterAuth: [rows] });
+      const fs = makeFakeFirestore(captured, { subcollectionDocs: { turns } });
       const out = (await mod.invokeTool(
         "trigger_compactor",
         { threshold: 20, compact_count: 5 },
-        makeCtx(db),
+        makeCtx(fs),
       )) as { should_compact: boolean; oldest_turns: Array<{ turn_number: number }> };
       expect(out.should_compact).toBe(true);
+      // The fake doesn't slice/order the docs, so it returns the seeded
+      // order — turns 1..25 → first 5 are 1..5. Matches the test's intent.
       expect(out.oldest_turns.map((t) => t.turn_number)).toEqual([1, 2, 3, 4, 5]);
     });
   });

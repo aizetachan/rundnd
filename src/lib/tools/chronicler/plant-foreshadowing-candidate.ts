@@ -1,4 +1,5 @@
-import { foreshadowingSeeds } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -11,10 +12,10 @@ import { registerTool } from "../registry";
  * RESOLVED or ABANDONED via `resolve_seed`.
  *
  * KA has its own `plant_foreshadowing_seed` entrypoint for seeds it
- * plants deliberately mid-scene. Both write to the same table with the
- * same PLANTED status — two call sites, one artifact. The "candidate"
- * framing signals: Chronicler spotted this retrospectively, not
- * pre-planned.
+ * plants deliberately mid-scene. Both write to the same collection with
+ * the same PLANTED status — two call sites, one artifact. The
+ * "candidate" framing signals: Chronicler spotted this retrospectively,
+ * not pre-planned.
  */
 const InputSchema = z.object({
   name: z.string().min(1),
@@ -27,7 +28,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   status: z.literal("PLANTED"),
 });
 
@@ -39,9 +40,12 @@ export const plantForeshadowingCandidateTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(foreshadowingSeeds)
-      .values({
+    if (!ctx.firestore) throw new Error("plant_foreshadowing_candidate: ctx.firestore not provided");
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.foreshadowingSeeds)
+      .add({
         campaignId: ctx.campaignId,
         name: input.name,
         description: input.description,
@@ -51,9 +55,10 @@ export const plantForeshadowingCandidateTool = registerTool({
         dependsOn: input.depends_on,
         conflictsWith: input.conflicts_with,
         plantedTurn: input.planted_turn,
-      })
-      .returning({ id: foreshadowingSeeds.id });
-    if (!row) throw new Error("plant_foreshadowing_candidate: insert returned no row");
-    return { id: row.id, status: "PLANTED" as const };
+        resolvedTurn: null,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id, status: "PLANTED" as const };
   },
 });

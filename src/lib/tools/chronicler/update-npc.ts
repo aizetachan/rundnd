@@ -1,5 +1,5 @@
-import { npcs } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL, safeNameId } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -9,10 +9,14 @@ import { registerTool } from "../registry";
  * updated last_seen_turn. All fields optional except the lookup key
  * (id XOR name). Fields omitted from the input are left unchanged.
  *
- * For jsonb array fields (goals, secrets, visual_tags), the caller
- * supplies the full new array — this tool replaces, not appends.
- * Chronicler's prompt is responsible for reading current values
- * (via get_npc_details) and passing the merged result.
+ * For array fields (goals, secrets, visual_tags), the caller supplies
+ * the full new array — this tool replaces, not appends. Chronicler's
+ * prompt is responsible for reading current values (via
+ * get_npc_details) and passing the merged result.
+ *
+ * Implementation: NPC doc id = safeNameId(name) (see register_npc).
+ * Lookup-by-name resolves to the same id; lookup-by-id is a direct
+ * path. set({...}, { merge: true }) leaves omitted keys untouched.
  */
 const InputSchema = z
   .object({
@@ -34,7 +38,7 @@ const InputSchema = z
   });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   updated: z.boolean(),
 });
 
@@ -46,9 +50,28 @@ export const updateNpcTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    // Drizzle's `set` ignores undefined values, but we still build the object
-    // explicitly so the snake↔camel field translation is visible and tested.
-    const patch: Record<string, unknown> = { updatedAt: new Date() };
+    if (!ctx.firestore) throw new Error("update_npc: ctx.firestore not provided");
+
+    // Resolve doc id. Both id and name route through the same safeNameId
+    // namespace because register_npc uses the sanitized name as the doc id.
+    let docId: string;
+    if (input.id !== undefined) {
+      docId = input.id;
+    } else if (input.name !== undefined) {
+      docId = safeNameId(input.name);
+    } else {
+      throw new Error("update_npc: Zod refinement failed to guarantee lookup key");
+    }
+
+    const ref = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.npcs)
+      .doc(docId);
+
+    // Build patch; only include fields the caller passed. Snake↔camel
+    // translation stays explicit.
+    const patch: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp() };
     if (input.role !== undefined) patch.role = input.role;
     if (input.personality !== undefined) patch.personality = input.personality;
     if (input.goals !== undefined) patch.goals = input.goals;
@@ -60,20 +83,11 @@ export const updateNpcTool = registerTool({
     if (input.ensemble_archetype !== undefined) patch.ensembleArchetype = input.ensemble_archetype;
     if (input.last_seen_turn !== undefined) patch.lastSeenTurn = input.last_seen_turn;
 
-    // Zod refinement guarantees at least one of id/name is set; narrow via
-    // explicit check to avoid non-null assertions.
-    const whereCond =
-      input.id !== undefined
-        ? and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.id, input.id))
-        : input.name !== undefined
-          ? and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.name, input.name))
-          : undefined;
-    if (!whereCond) throw new Error("update_npc: Zod refinement failed to guarantee lookup key");
-
-    const rows = await ctx.db.update(npcs).set(patch).where(whereCond).returning({ id: npcs.id });
-
-    const [row] = rows;
-    if (!row) throw new Error(`update_npc: no NPC found (${input.id ?? input.name})`);
-    return { id: row.id, updated: true };
+    const snap = await ref.get();
+    if (!snap.exists) {
+      throw new Error(`update_npc: no NPC found (${input.id ?? input.name})`);
+    }
+    await ref.set(patch, { merge: true });
+    return { id: docId, updated: true };
   },
 });

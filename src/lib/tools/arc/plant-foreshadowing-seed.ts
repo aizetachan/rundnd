@@ -1,4 +1,5 @@
-import { foreshadowingSeeds } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -6,8 +7,8 @@ import { registerTool } from "../registry";
  * Plant a new foreshadowing seed — KA entrypoint for deliberate
  * mid-scene planting. Referenced in KA's Block 1 prompt. Chronicler has
  * its own `plant_foreshadowing_candidate` for retrospective spotting;
- * both write the same PLANTED status to the same table. Two call sites,
- * one artifact.
+ * both write the same PLANTED status to the same collection. Two call
+ * sites, one artifact.
  *
  * Director's session-boundary review (later milestone) ratifies PLANTED
  * → GROWING and eventually marks them RESOLVED or ABANDONED via
@@ -24,7 +25,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  seed_id: z.string().uuid(),
+  seed_id: z.string().min(1),
   status: z.literal("PLANTED"),
 });
 
@@ -36,9 +37,12 @@ export const plantForeshadowingSeedTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(foreshadowingSeeds)
-      .values({
+    if (!ctx.firestore) throw new Error("plant_foreshadowing_seed: ctx.firestore not provided");
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.foreshadowingSeeds)
+      .add({
         campaignId: ctx.campaignId,
         name: input.name,
         description: input.description,
@@ -48,9 +52,10 @@ export const plantForeshadowingSeedTool = registerTool({
         dependsOn: input.depends_on,
         conflictsWith: input.conflicts_with,
         plantedTurn: input.planted_turn,
-      })
-      .returning({ id: foreshadowingSeeds.id });
-    if (!row) throw new Error("plant_foreshadowing_seed: insert returned no row");
-    return { seed_id: row.id, status: "PLANTED" as const };
+        resolvedTurn: null,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    return { seed_id: ref.id, status: "PLANTED" as const };
   },
 });

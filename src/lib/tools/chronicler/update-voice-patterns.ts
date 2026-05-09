@@ -1,4 +1,5 @@
-import { voicePatterns } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -25,7 +26,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
 });
 
 export const updateVoicePatternsTool = registerTool({
@@ -36,16 +37,18 @@ export const updateVoicePatternsTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(voicePatterns)
-      .values({
+    if (!ctx.firestore) throw new Error("update_voice_patterns: ctx.firestore not provided");
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.voicePatterns)
+      .add({
         campaignId: ctx.campaignId,
         pattern: input.pattern,
         evidence: input.evidence,
         turnObserved: input.turn_observed,
-      })
-      .returning({ id: voicePatterns.id });
-    if (!row) throw new Error("update_voice_patterns: insert returned no row");
-    return { id: row.id };
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id };
   },
 });

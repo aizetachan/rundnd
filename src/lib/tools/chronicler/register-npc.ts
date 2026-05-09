@@ -1,17 +1,20 @@
-import { npcs } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL, safeNameId } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
 /**
  * Register a new NPC in the campaign's catalog. Chronicler calls this
- * post-turn when it detects a named character that isn't yet in `npcs`.
- * No-op on conflict (campaignId, name) — existing entries are updated
- * via `update_npc` instead of clobbered. Returns the id either way so
- * downstream tools (record_relationship_event) can reference it.
+ * post-turn when it detects a named character that isn't yet in the
+ * subcollection. Idempotent on (campaignId, name) — second call with
+ * the same name returns the existing id.
  *
- * Matches v3 WorldBuilder NPCDetails shape. Fields left unset get the
- * column defaults (role=acquaintance, power_tier=T10, empty arrays).
+ * Implementation: doc id = safeNameId(name). Firestore guarantees doc
+ * id uniqueness within a collection, so two concurrent calls with the
+ * same name converge on the same doc instead of creating duplicates
+ * (the race-prone query+insert pattern that Postgres hid behind ON
+ * CONFLICT). `created` is true when the doc didn't exist before this
+ * call.
  */
 const InputSchema = z.object({
   name: z.string().min(1),
@@ -29,10 +32,8 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
-  created: z
-    .boolean()
-    .describe("True if a new row was inserted; false if (campaignId, name) already existed"),
+  id: z.string(),
+  created: z.boolean(),
 });
 
 export const registerNpcTool = registerTool({
@@ -43,10 +44,20 @@ export const registerNpcTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    // Try insert; on conflict return the existing id.
-    const inserted = await ctx.db
-      .insert(npcs)
-      .values({
+    if (!ctx.firestore) throw new Error("register_npc: ctx.firestore not provided");
+    const id = safeNameId(input.name);
+    const ref = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.npcs)
+      .doc(id);
+
+    return await ctx.firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) {
+        return { id, created: false };
+      }
+      tx.set(ref, {
         campaignId: ctx.campaignId,
         name: input.name,
         role: input.role ?? "acquaintance",
@@ -58,23 +69,13 @@ export const registerNpcTool = registerTool({
         knowledgeTopics: input.knowledge_topics ?? {},
         powerTier: input.power_tier ?? "T10",
         ensembleArchetype: input.ensemble_archetype ?? null,
+        isTransient: false,
         firstSeenTurn: input.first_seen_turn,
         lastSeenTurn: input.last_seen_turn,
-      })
-      .onConflictDoNothing({ target: [npcs.campaignId, npcs.name] })
-      .returning({ id: npcs.id });
-
-    const [newRow] = inserted;
-    if (newRow) return { id: newRow.id, created: true };
-
-    // Conflict: fetch the existing id so Chronicler can still hand it downstream.
-    const [existing] = await ctx.db
-      .select({ id: npcs.id })
-      .from(npcs)
-      .where(and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.name, input.name)))
-      .limit(1);
-    if (!existing)
-      throw new Error(`register_npc: insert conflict but no existing row (${input.name})`);
-    return { id: existing.id, created: false };
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return { id, created: true };
+    });
   },
 });

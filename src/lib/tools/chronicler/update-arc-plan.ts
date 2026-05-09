@@ -1,18 +1,20 @@
-import { arcPlanHistory } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
 /**
- * Append a new row to `arc_plan_history` — the append-only audit trail
- * of Director's arc decisions. Latest row per campaign is the current
- * state; older rows preserve how the arc evolved. Chronicler writes on
- * hybrid triggers (every 3+ turns at epicness ≥ 0.6) or session
- * boundaries when arc_mode / arc_phase should shift based on what
- * happened in recent turns.
+ * Append a new doc to `arcPlanHistory` — the append-only audit trail of
+ * Director's arc decisions. Latest doc per campaign (by createdAt) is
+ * the current state; older docs preserve how the arc evolved.
+ * Chronicler writes on hybrid triggers (every 3+ turns at epicness ≥
+ * 0.6) or session boundaries when arc_mode / arc_phase should shift
+ * based on what happened in recent turns.
  *
- * Tension level is 0.0–1.0; phase and mode use the schema's closed
- * enums. `planned_beats` is an advisory array KA reads in Block 4 —
- * not a script, not prescriptive past the next 1–3 turns.
+ * Tension level is 0.0–1.0 (rounded to 2 decimal places by the tool).
+ * Phase and mode use the schema's closed enums. `planned_beats` is an
+ * advisory array KA reads in Block 4 — not a script, not prescriptive
+ * past the next 1–3 turns.
  */
 const InputSchema = z.object({
   current_arc: z.string().min(1).describe("Short name for the active arc"),
@@ -31,7 +33,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   set_at_turn: z.number().int().positive(),
 });
 
@@ -43,20 +45,25 @@ export const updateArcPlanTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(arcPlanHistory)
-      .values({
+    if (!ctx.firestore) throw new Error("update_arc_plan: ctx.firestore not provided");
+    // Round tension to 2 decimal places to match v3's numeric(3,2) shape;
+    // Firestore stores numbers natively so no string conversion needed.
+    const tensionLevel = Math.round(input.tension_level * 100) / 100;
+
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.arcPlanHistory)
+      .add({
         campaignId: ctx.campaignId,
         currentArc: input.current_arc,
         arcPhase: input.arc_phase,
         arcMode: input.arc_mode,
         plannedBeats: input.planned_beats,
-        // numeric column — Drizzle accepts a string at this precision
-        tensionLevel: input.tension_level.toFixed(2),
+        tensionLevel,
         setAtTurn: input.set_at_turn,
-      })
-      .returning({ id: arcPlanHistory.id, setAtTurn: arcPlanHistory.setAtTurn });
-    if (!row) throw new Error("update_arc_plan: insert returned no row");
-    return { id: row.id, set_at_turn: row.setAtTurn };
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id, set_at_turn: input.set_at_turn };
   },
 });

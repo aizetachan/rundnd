@@ -1,4 +1,5 @@
-import { semanticMemories } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -9,7 +10,7 @@ import { registerTool } from "../registry";
  * `search_memory` ranks by relevance * heat * decay-by-category.
  *
  * Embedding stays null at M1 — the embedder decision is M4 per §9.3.
- * Read path uses tsvector + category + heat until embeddings populate.
+ * Read path uses category + heat until embeddings populate.
  */
 const InputSchema = z.object({
   category: z
@@ -36,7 +37,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
 });
 
 export const writeSemanticMemoryTool = registerTool({
@@ -47,19 +48,21 @@ export const writeSemanticMemoryTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(semanticMemories)
-      .values({
+    if (!ctx.firestore) throw new Error("write_semantic_memory: ctx.firestore not provided");
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.semanticMemories)
+      .add({
         campaignId: ctx.campaignId,
         category: input.category,
         content: input.content,
         heat: input.heat,
         flags: input.flags ?? {},
         turnNumber: input.turn_number,
-        // embedding stays null — M4 decides embedder
-      })
-      .returning({ id: semanticMemories.id });
-    if (!row) throw new Error("write_semantic_memory: insert returned no row");
-    return { id: row.id };
+        embedding: null,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id };
   },
 });

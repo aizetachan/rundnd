@@ -1,14 +1,18 @@
-import { factions } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL, safeNameId } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
 /**
  * Register a new faction (organization, syndicate, government, etc.)
- * in the campaign's catalog. No-op on conflict (campaignId, name).
- * `details` is free-form jsonb — goals, leadership, member NPCs by
- * name, etc. Chronicler calls this when KA introduces an organization
- * that isn't already catalogued.
+ * in the campaign's catalog. No-op on conflict by name. `details` is a
+ * free-form record — goals, leadership, member NPCs by name, etc.
+ * Chronicler calls this when KA introduces an organization that isn't
+ * already catalogued.
+ *
+ * Implementation: doc id = safeNameId(name). Firestore guarantees doc
+ * id uniqueness within a collection, so two concurrent calls with the
+ * same name converge on the same doc instead of creating duplicates.
  */
 const InputSchema = z.object({
   name: z.string().min(1),
@@ -16,7 +20,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   created: z.boolean(),
 });
 
@@ -28,26 +32,27 @@ export const registerFactionTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const inserted = await ctx.db
-      .insert(factions)
-      .values({
+    if (!ctx.firestore) throw new Error("register_faction: ctx.firestore not provided");
+    const id = safeNameId(input.name);
+    const ref = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.factions)
+      .doc(id);
+
+    return await ctx.firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) {
+        return { id, created: false };
+      }
+      tx.set(ref, {
         campaignId: ctx.campaignId,
         name: input.name,
         details: input.details ?? {},
-      })
-      .onConflictDoNothing({ target: [factions.campaignId, factions.name] })
-      .returning({ id: factions.id });
-
-    const [newRow] = inserted;
-    if (newRow) return { id: newRow.id, created: true };
-
-    const [existing] = await ctx.db
-      .select({ id: factions.id })
-      .from(factions)
-      .where(and(eq(factions.campaignId, ctx.campaignId), eq(factions.name, input.name)))
-      .limit(1);
-    if (!existing)
-      throw new Error(`register_faction: insert conflict but no existing row (${input.name})`);
-    return { id: existing.id, created: false };
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return { id, created: true };
+    });
   },
 });

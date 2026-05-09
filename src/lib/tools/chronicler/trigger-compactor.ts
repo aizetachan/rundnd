@@ -1,5 +1,4 @@
-import { turns } from "@/lib/state/schema";
-import { asc, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -19,6 +18,11 @@ import { registerTool } from "../registry";
  *
  * M1 default threshold is 20; M4+ the working-memory architecture may
  * tune this per-campaign.
+ *
+ * Implementation: a count() aggregation gates the compaction decision
+ * cheaply, and we only fetch the oldest `compact_count` turn docs when
+ * we cross the threshold. Ordering by turnNumber ascending matches the
+ * v3 SQL ORDER BY turn_number ASC.
  */
 const InputSchema = z.object({
   threshold: z.number().int().min(5).max(100).default(20),
@@ -46,29 +50,41 @@ export const triggerCompactorTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const turnRows = await ctx.db
-      .select({
-        turnNumber: turns.turnNumber,
-        narrativeText: turns.narrativeText,
-        summary: turns.summary,
-      })
-      .from(turns)
-      .where(eq(turns.campaignId, ctx.campaignId))
-      .orderBy(asc(turns.turnNumber));
+    if (!ctx.firestore) throw new Error("trigger_compactor: ctx.firestore not provided");
+    const turnsCol = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.turns);
 
-    const turnCount = turnRows.length;
+    const countSnap = await turnsCol.count().get();
+    const turnCount = countSnap.data().count;
     const shouldCompact = turnCount > input.threshold;
-    const oldest = shouldCompact ? turnRows.slice(0, input.compact_count) : [];
+
+    let oldestTurns: Array<{
+      turn_number: number;
+      narrative_text: string;
+      summary: string | null;
+    }> = [];
+    if (shouldCompact) {
+      const oldestSnap = await turnsCol
+        .orderBy("turnNumber", "asc")
+        .limit(input.compact_count)
+        .get();
+      oldestTurns = oldestSnap.docs.map((d) => {
+        const r = d.data();
+        return {
+          turn_number: r.turnNumber as number,
+          narrative_text: (r.narrativeText as string) ?? "",
+          summary: (r.summary as string | null | undefined) ?? null,
+        };
+      });
+    }
 
     return {
       turn_count: turnCount,
       threshold: input.threshold,
       should_compact: shouldCompact,
-      oldest_turns: oldest.map((r) => ({
-        turn_number: r.turnNumber,
-        narrative_text: r.narrativeText,
-        summary: r.summary ?? null,
-      })),
+      oldest_turns: oldestTurns,
     };
   },
 });

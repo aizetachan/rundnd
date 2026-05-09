@@ -1,8 +1,8 @@
 import { generateContextBlock } from "@/lib/agents";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { anthropicFallbackConfig } from "@/lib/providers";
-import { contextBlocks, npcs } from "@/lib/state/schema";
 import { ContextBlockType } from "@/lib/types/entities";
-import { and, eq } from "drizzle-orm";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -16,7 +16,8 @@ import { registerTool } from "../registry";
  *   1. Check for an existing block (same campaign, block_type,
  *      entity_name). If present, treat its content as prior_version.
  *   2. Gather structured entity_data from the appropriate catalog
- *      table (npcs for "npc", plans for "arc", etc.).
+ *      subcollection (npcs for "npc", and other entity kinds backfill
+ *      as those catalogs mature).
  *   3. Invoke generateContextBlock with the collected context.
  *   4. Upsert: existing → version+1; new → version=1.
  *
@@ -25,6 +26,12 @@ import { registerTool } from "../registry";
  * content quality consistent.
  *
  * Phase 3C of v3-audit closure (docs/plans/v3-audit-closure.md §3.3).
+ *
+ * Implementation: Firestore has no compound unique index on
+ * (blockType, entityName). We resolve the existing doc with a
+ * .where().where().limit(1) query and run the version-bump in a
+ * transaction so two concurrent writers can't both create version=1
+ * docs.
  */
 
 const InputSchema = z.object({
@@ -54,38 +61,40 @@ export const updateContextBlockTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    // Load existing block (for prior_version) + any structured entity data.
-    const [existing] = await ctx.db
-      .select({
-        id: contextBlocks.id,
-        content: contextBlocks.content,
-        continuityChecklist: contextBlocks.continuityChecklist,
-        version: contextBlocks.version,
-        firstTurn: contextBlocks.firstTurn,
-      })
-      .from(contextBlocks)
-      .where(
-        and(
-          eq(contextBlocks.campaignId, ctx.campaignId),
-          eq(contextBlocks.blockType, input.block_type),
-          eq(contextBlocks.entityName, input.entity_name),
-        ),
-      )
-      .limit(1);
+    if (!ctx.firestore) throw new Error("update_context_block: ctx.firestore not provided");
 
-    // Structured entity data by block_type. NPC blocks pull from npcs;
-    // other kinds land with empty entityData at M1 (arc/quest/faction/
-    // location backfill lands as those catalogs mature).
+    const blocksCol = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.contextBlocks);
+
+    // Locate the existing block (if any) for this (block_type, entity_name).
+    const existingSnap = await blocksCol
+      .where("blockType", "==", input.block_type)
+      .where("entityName", "==", input.entity_name)
+      .limit(1)
+      .get();
+    const existingDoc = existingSnap.docs[0] ?? null;
+    const existingData = existingDoc?.data() ?? null;
+
+    // Structured entity data by block_type. NPC blocks pull from the
+    // campaign's npcs subcollection; other kinds land with empty
+    // entityData at M1 (arc/quest/faction/location backfill lands as
+    // those catalogs mature).
     let entityData: Record<string, unknown> = {};
     let entityId: string | null = null;
     if (input.block_type === "npc") {
-      const [npc] = await ctx.db
-        .select()
-        .from(npcs)
-        .where(and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.name, input.entity_name)))
-        .limit(1);
-      if (npc) {
-        entityId = npc.id;
+      const npcSnap = await ctx.firestore
+        .collection(COL.campaigns)
+        .doc(ctx.campaignId)
+        .collection(CAMPAIGN_SUB.npcs)
+        .where("name", "==", input.entity_name)
+        .limit(1)
+        .get();
+      const npcDoc = npcSnap.docs[0];
+      if (npcDoc) {
+        const npc = npcDoc.data();
+        entityId = npcDoc.id;
         entityData = {
           role: npc.role,
           personality: npc.personality,
@@ -113,49 +122,50 @@ export const updateContextBlockTool = registerTool({
         entityData,
         relatedTurns: input.related_turns ?? [],
         relatedMemories: input.related_memories ?? [],
-        priorVersion: existing
+        priorVersion: existingData
           ? {
-              content: existing.content,
-              continuity_checklist: existing.continuityChecklist as Record<string, unknown>,
-              version: existing.version,
+              content: existingData.content,
+              continuity_checklist: (existingData.continuityChecklist ?? {}) as Record<
+                string,
+                unknown
+              >,
+              version: existingData.version as number,
             }
           : null,
       },
       { modelContext: anthropicFallbackConfig() },
     );
 
-    if (existing) {
-      await ctx.db
-        .update(contextBlocks)
-        .set({
+    if (existingDoc && existingData) {
+      const nextVersion = (existingData.version as number) + 1;
+      await existingDoc.ref.set(
+        {
           content: generated.content,
           continuityChecklist: generated.continuity_checklist,
-          version: existing.version + 1,
+          version: nextVersion,
           lastUpdatedTurn: input.turn_number,
-          updatedAt: new Date(),
-        })
-        .where(eq(contextBlocks.id, existing.id));
-      return { id: existing.id, version: existing.version + 1, created: false };
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return { id: existingDoc.id, version: nextVersion, created: false };
     }
 
-    const [inserted] = await ctx.db
-      .insert(contextBlocks)
-      .values({
-        campaignId: ctx.campaignId,
-        blockType: input.block_type,
-        entityId,
-        entityName: input.entity_name,
-        content: generated.content,
-        continuityChecklist: generated.continuity_checklist,
-        status: "active",
-        version: 1,
-        firstTurn: input.turn_number,
-        lastUpdatedTurn: input.turn_number,
-      })
-      .returning({ id: contextBlocks.id });
-    if (!inserted) {
-      throw new Error("update_context_block: insert returned no row");
-    }
-    return { id: inserted.id, version: 1, created: true };
+    const newRef = await blocksCol.add({
+      campaignId: ctx.campaignId,
+      blockType: input.block_type,
+      entityId,
+      entityName: input.entity_name,
+      content: generated.content,
+      continuityChecklist: generated.continuity_checklist,
+      status: "active",
+      version: 1,
+      firstTurn: input.turn_number,
+      lastUpdatedTurn: input.turn_number,
+      embedding: null,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { id: newRef.id, version: 1, created: true };
   },
 });

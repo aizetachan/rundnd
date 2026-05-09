@@ -1,4 +1,5 @@
-import { relationshipEvents } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 import { assertNpcBelongsToCampaign } from "./_npc-guard";
@@ -22,7 +23,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
 });
 
 export const recordRelationshipEventTool = registerTool({
@@ -33,20 +34,23 @@ export const recordRelationshipEventTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    // Defense-in-depth: the FK on npc_id points at npcs.id (single column),
-    // so the DB won't catch a cross-campaign id by itself.
+    if (!ctx.firestore) throw new Error("record_relationship_event: ctx.firestore not provided");
+    // Defense-in-depth: verify the npc lives under this campaign before
+    // recording an event against it. Firestore has no FKs.
     await assertNpcBelongsToCampaign(ctx, input.npc_id, "record_relationship_event");
-    const [row] = await ctx.db
-      .insert(relationshipEvents)
-      .values({
+
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.relationshipEvents)
+      .add({
         campaignId: ctx.campaignId,
         npcId: input.npc_id,
         milestoneType: input.milestone_type,
         evidence: input.evidence,
         turnNumber: input.turn_number,
-      })
-      .returning({ id: relationshipEvents.id });
-    if (!row) throw new Error("record_relationship_event: insert returned no row");
-    return { id: row.id };
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id };
   },
 });

@@ -1,5 +1,5 @@
-import { foreshadowingSeeds } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -13,13 +13,16 @@ import { registerTool } from "../registry";
  * Director landing is post-M1; we ship the tool now because plan §7.2
  * enumerates it as a 7.2 deliverable. The write path is exercised in
  * this commit; the orchestrator that calls it lands later.
+ *
+ * Implementation: runs in a transaction so the PLANTED→GROWING guard
+ * is race-free against concurrent ratify calls.
  */
 const InputSchema = z.object({
   seed_id: z.string().uuid(),
 });
 
 const OutputSchema = z.object({
-  seed_id: z.string().uuid(),
+  seed_id: z.string().min(1),
   status: z.literal("GROWING"),
 });
 
@@ -31,23 +34,32 @@ export const ratifyForeshadowingSeedTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const rows = await ctx.db
-      .update(foreshadowingSeeds)
-      .set({ status: "GROWING", updatedAt: new Date() })
-      .where(
-        and(
-          eq(foreshadowingSeeds.campaignId, ctx.campaignId),
-          eq(foreshadowingSeeds.id, input.seed_id),
-          eq(foreshadowingSeeds.status, "PLANTED"),
-        ),
-      )
-      .returning({ id: foreshadowingSeeds.id });
-    const [row] = rows;
-    if (!row) {
-      throw new Error(
-        `ratify_foreshadowing_seed: no PLANTED seed found for id ${input.seed_id} (may already be ratified, resolved, or belong to another campaign)`,
+    if (!ctx.firestore) throw new Error("ratify_foreshadowing_seed: ctx.firestore not provided");
+    const ref = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.foreshadowingSeeds)
+      .doc(input.seed_id);
+
+    return await ctx.firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) {
+        throw new Error(
+          `ratify_foreshadowing_seed: no PLANTED seed found for id ${input.seed_id} (may already be ratified, resolved, or belong to another campaign)`,
+        );
+      }
+      const data = snap.data() ?? {};
+      if (data.status !== "PLANTED") {
+        throw new Error(
+          `ratify_foreshadowing_seed: no PLANTED seed found for id ${input.seed_id} (may already be ratified, resolved, or belong to another campaign)`,
+        );
+      }
+      tx.set(
+        ref,
+        { status: "GROWING", updatedAt: FieldValue.serverTimestamp() },
+        { merge: true },
       );
-    }
-    return { seed_id: row.id, status: "GROWING" as const };
+      return { seed_id: input.seed_id, status: "GROWING" as const };
+    });
   },
 });

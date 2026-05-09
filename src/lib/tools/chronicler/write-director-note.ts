@@ -1,4 +1,5 @@
-import { directorNotes } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -22,7 +23,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
 });
 
 export const writeDirectorNoteTool = registerTool({
@@ -33,16 +34,18 @@ export const writeDirectorNoteTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .insert(directorNotes)
-      .values({
+    if (!ctx.firestore) throw new Error("write_director_note: ctx.firestore not provided");
+    const ref = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.directorNotes)
+      .add({
         campaignId: ctx.campaignId,
         content: input.content,
         scope: input.scope,
         createdAtTurn: input.created_at_turn,
-      })
-      .returning({ id: directorNotes.id });
-    if (!row) throw new Error("write_director_note: insert returned no row");
-    return { id: row.id };
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    return { id: ref.id };
   },
 });

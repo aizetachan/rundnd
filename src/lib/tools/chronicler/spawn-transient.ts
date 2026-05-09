@@ -1,5 +1,5 @@
-import { npcs } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL, safeNameId } from "@/lib/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -15,11 +15,11 @@ import { registerTool } from "../registry";
  * `register_npc` for recurring figures, `spawn_transient` for one-off
  * flavor.
  *
- * Implementation: inserts into `npcs` table with is_transient=true and
- * the same unique (campaignId, name) constraint as register_npc — a
- * transient can be "upgraded" to catalog via update_npc if it
- * subsequently returns to the scene. (The reverse — demoting a catalog
- * NPC to transient — isn't currently supported; rare and ambiguous.)
+ * Implementation: writes to the same `npcs` subcollection as
+ * register_npc with isTransient=true. Doc id = safeNameId(name) so a
+ * later re-spawn (or upgrade via update_npc) lands on the same doc.
+ * The reverse — demoting a catalog NPC to transient — isn't currently
+ * supported; rare and ambiguous.
  */
 const InputSchema = z.object({
   name: z.string().min(1),
@@ -30,7 +30,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   created: z.boolean(),
 });
 
@@ -42,30 +42,38 @@ export const spawnTransientTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const inserted = await ctx.db
-      .insert(npcs)
-      .values({
+    if (!ctx.firestore) throw new Error("spawn_transient: ctx.firestore not provided");
+    const id = safeNameId(input.name);
+    const ref = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.npcs)
+      .doc(id);
+
+    return await ctx.firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) {
+        return { id, created: false };
+      }
+      tx.set(ref, {
         campaignId: ctx.campaignId,
         name: input.name,
         role: "transient",
         personality: input.description,
+        goals: [],
+        secrets: [],
+        faction: null,
+        visualTags: [],
+        knowledgeTopics: {},
+        powerTier: "T10",
+        ensembleArchetype: null,
         isTransient: true,
         firstSeenTurn: input.turn_number,
         lastSeenTurn: input.turn_number,
-      })
-      .onConflictDoNothing({ target: [npcs.campaignId, npcs.name] })
-      .returning({ id: npcs.id });
-
-    const [newRow] = inserted;
-    if (newRow) return { id: newRow.id, created: true };
-
-    const [existing] = await ctx.db
-      .select({ id: npcs.id })
-      .from(npcs)
-      .where(and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.name, input.name)))
-      .limit(1);
-    if (!existing)
-      throw new Error(`spawn_transient: insert conflict but no existing row (${input.name})`);
-    return { id: existing.id, created: false };
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return { id, created: true };
+    });
   },
 });
