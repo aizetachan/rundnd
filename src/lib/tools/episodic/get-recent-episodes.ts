@@ -1,5 +1,4 @@
-import { turns } from "@/lib/state/schema";
-import { desc, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -33,17 +32,29 @@ export const getRecentEpisodesTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const rows = await ctx.db
-      .select({
-        turn_number: turns.turnNumber,
-        summary: turns.summary,
-        narrative_text: turns.narrativeText,
-        intent: turns.intent,
-      })
-      .from(turns)
-      .where(eq(turns.campaignId, ctx.campaignId))
-      .orderBy(desc(turns.turnNumber))
-      .limit(input.n);
+    if (!ctx.firestore) throw new Error("get_recent_episodes: ctx.firestore not provided");
+    const snap = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.turns)
+      .orderBy("turnNumber", "desc")
+      .limit(input.n)
+      .get();
+
+    const rows = snap.docs.map((d) => {
+      const data = d.data() as {
+        turnNumber: number;
+        summary?: string | null;
+        narrativeText?: string | null;
+        intent?: unknown;
+      };
+      return {
+        turn_number: data.turnNumber,
+        summary: data.summary ?? null,
+        narrative_text: data.narrativeText ?? null,
+        intent: data.intent ?? null,
+      };
+    });
 
     // Return oldest → newest so continuity reads naturally.
     const ordered = rows.slice().reverse();

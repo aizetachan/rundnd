@@ -211,21 +211,36 @@ export async function chronicleTurn(
 
     // Run heat decay post-Chronicler so any memories Chronicler just
     // wrote at the current turn don't decay on their insert-turn
-    // (GREATEST(0, currentTurn - turn_number) = 0 → multiplier^0 = 1).
+    // (Math.max(0, currentTurn - turn_number) = 0 → multiplier^0 = 1).
     // Earlier memories get their turn-distance multiplier applied.
     // Runs best-effort: a decay failure is logged but doesn't fail the
     // chronicling pass, which has already been stamped-idempotent.
-    try {
-      const decayResult = await decayHeat(db, input.campaignId, input.turnNumber);
-      logger("info", "chronicleTurn: decayHeat ok", {
-        ...logContext,
-        rowsAffected: decayResult.rowsAffected,
-      });
-    } catch (err) {
-      logger("warn", "chronicleTurn: decayHeat failed (non-fatal)", {
+    //
+    // Firestore-only: skip the decay pass when ctx.firestore is unavailable
+    // (test environment running against the legacy Drizzle fake). The
+    // skip is logged so silent no-ops don't go unnoticed in production.
+    if (toolContext.firestore) {
+      try {
+        const decayResult = await decayHeat(
+          toolContext.firestore,
+          input.campaignId,
+          input.turnNumber,
+        );
+        logger("info", "chronicleTurn: decayHeat ok", {
+          ...logContext,
+          rowsAffected: decayResult.rowsAffected,
+        });
+      } catch (err) {
+        logger("warn", "chronicleTurn: decayHeat failed (non-fatal)", {
+          ...logContext,
+          turnId: input.turnId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger("info", "chronicleTurn: decayHeat skipped (firestore unavailable)", {
         ...logContext,
         turnId: input.turnId,
-        error: err instanceof Error ? err.message : String(err),
       });
     }
 

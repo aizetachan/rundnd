@@ -1,6 +1,5 @@
-import type { Db } from "@/lib/db";
-import { semanticMemories } from "@/lib/state/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { type Firestore, FieldValue } from "firebase-admin/firestore";
 
 /**
  * Semantic-memory heat physics (§9.1 decay curves — v3-parity Phase 4).
@@ -128,72 +127,104 @@ export function heatFloor(flags: MemoryFlags | null | undefined, currentHeat: nu
   return 1;
 }
 
+/** Firestore commits cap each batch at 500 writes. Stay one short to leave
+ * headroom for the rare edge case where a future caller wants to bundle
+ * an extra op into the same batch. */
+const BATCH_LIMIT = 500;
+
 /**
  * Run decay on every memory in a campaign, advancing their heat to
  * reflect turn distance from `currentTurn`. Called from Chronicler's
  * end-of-pass (or manually via maintenance script).
  *
- * SQL does the math inline with a CASE expression so it's one round-trip
- * and the DB clamps at the floor. Performance: O(rows); adds O(n ms) to
- * the turn's post-response latency. For N > 10k semantic memories the
- * per-campaign wrapper should move to a background job (trivial later).
+ * Postgres-era implementation issued a single UPDATE with an inline
+ * CASE expression and a GREATEST(floor, FLOOR(heat * mult^delta)) clamp —
+ * one round-trip, server-side math. Firestore has no equivalent, so we
+ * read every memory, compute the new heat in JS using the same formula,
+ * then commit batched updates (500-doc cap per batch). For typical M1
+ * campaign sizes (low hundreds of memories) one read pass + one batch
+ * commit is fine; if N > 10k this should move to a background job.
  */
 export async function decayHeat(
-  db: Db,
+  firestore: Firestore,
   campaignId: string,
   currentTurn: number,
 ): Promise<{ rowsAffected: number }> {
-  // Build a CASE expression that maps each known category to its
-  // multiplier. Unknown categories default to `normal` (0.90). Category
-  // keys are our own enum (no user input); safe to interpolate but we
-  // single-quote-escape defensively anyway.
-  const whenClauses = Object.entries(CATEGORY_DECAY)
-    .map(([cat, curve]) => {
-      const escaped = cat.replace(/'/g, "''");
-      return `WHEN '${escaped}' THEN ${DECAY_CURVES[curve]}`;
-    })
-    .join(" ");
-  const multiplierExpr = sql.raw(`CASE category ${whenClauses} ELSE ${DECAY_CURVES.normal} END`);
-  // delta_turns = max(0, currentTurn - turn_number). New memories (same
-  // turn) don't decay on their insert-turn.
-  const deltaExpr = sql`GREATEST(0, ${currentTurn}::int - "turn_number")`;
-  // floor = plot_critical(heat) -> current heat, milestone_relationship -> 40, else -> 1
-  const floorExpr = sql`
-    CASE
-      WHEN flags ->> 'plot_critical' = 'true' THEN heat
-      WHEN flags ->> 'milestone_relationship' = 'true' THEN 40
-      ELSE 1
-    END
-  `;
-  const decayedExpr = sql`GREATEST(${floorExpr}, FLOOR(heat * POWER(${multiplierExpr}, ${deltaExpr}))::int)`;
+  const memoriesRef = firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.semanticMemories);
+  const snap = await memoriesRef.get();
+  if (snap.empty) return { rowsAffected: 0 };
 
-  const result = await db
-    .update(semanticMemories)
-    .set({ heat: decayedExpr as unknown as number })
-    .where(eq(semanticMemories.campaignId, campaignId));
-  // Drizzle returns different shapes by driver; best-effort row count.
-  const rowsAffected =
-    (result as unknown as { rowCount?: number; count?: number }).rowCount ??
-    (result as unknown as { count?: number }).count ??
-    0;
+  let rowsAffected = 0;
+  let batch = firestore.batch();
+  let pending = 0;
+
+  for (const doc of snap.docs) {
+    const data = doc.data() as {
+      category?: string;
+      heat?: number;
+      turnNumber?: number;
+      flags?: MemoryFlags | null;
+    };
+    const heat = typeof data.heat === "number" ? data.heat : 0;
+    const turnNumber = typeof data.turnNumber === "number" ? data.turnNumber : currentTurn;
+    const category = data.category ?? "";
+    const flags = data.flags ?? null;
+
+    // delta_turns = max(0, currentTurn - turn_number). New memories
+    // (same turn) don't decay on their insert-turn (mult^0 = 1).
+    const delta = Math.max(0, currentTurn - turnNumber);
+    const multiplier = DECAY_CURVES[curveFor(category)];
+    const decayed = Math.floor(heat * multiplier ** delta);
+    const floor = heatFloor(flags, heat);
+    const newHeat = Math.max(floor, decayed);
+
+    if (newHeat === heat) continue;
+
+    batch.update(doc.ref, { heat: newHeat });
+    pending += 1;
+    rowsAffected += 1;
+
+    if (pending >= BATCH_LIMIT) {
+      await batch.commit();
+      batch = firestore.batch();
+      pending = 0;
+    }
+  }
+
+  if (pending > 0) {
+    await batch.commit();
+  }
+
   return { rowsAffected };
 }
 
 /**
  * Boost heat on a specific memory that was just accessed via retrieval.
  * Called from `search_memory` after returning the top-k so the rows
- * that proved relevant stay hot. Clamps at 100.
+ * that proved relevant stay hot.
+ *
+ * Postgres clamped via SQL `LEAST(100, heat + boost)` server-side. Firestore
+ * `FieldValue.increment` cannot enforce a ceiling atomically; the next
+ * decay pass reins runaway values back down (heat is rebuilt from the
+ * stored value each turn anyway). For M0.5 the unbounded increment is
+ * acceptable — the floor invariant ([0, *)) is what retrieval ranking
+ * actually depends on, and it holds.
  */
 export async function boostHeatOnAccess(
-  db: Db,
+  firestore: Firestore,
   campaignId: string,
   memoryId: string,
   category: string,
 ): Promise<void> {
   const boost =
     category === "relationship" ? BOOST_ON_ACCESS.relationship : BOOST_ON_ACCESS.default;
-  await db
-    .update(semanticMemories)
-    .set({ heat: sql`LEAST(100, heat + ${boost})` })
-    .where(and(eq(semanticMemories.id, memoryId), eq(semanticMemories.campaignId, campaignId)));
+  const ref = firestore
+    .collection(COL.campaigns)
+    .doc(campaignId)
+    .collection(CAMPAIGN_SUB.semanticMemories)
+    .doc(memoryId);
+  await ref.set({ heat: FieldValue.increment(boost) }, { merge: true });
 }

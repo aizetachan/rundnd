@@ -1,5 +1,4 @@
-import { turns } from "@/lib/state/schema";
-import { and, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -30,18 +29,16 @@ export const getTurnNarrativeTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .select({
-        turn_number: turns.turnNumber,
-        player_message: turns.playerMessage,
-        narrative_text: turns.narrativeText,
-        intent: turns.intent,
-        outcome: turns.outcome,
-      })
-      .from(turns)
-      .where(and(eq(turns.campaignId, ctx.campaignId), eq(turns.turnNumber, input.turn_number)))
-      .limit(1);
-    if (!row) {
+    if (!ctx.firestore) throw new Error("get_turn_narrative: ctx.firestore not provided");
+    const snap = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.turns)
+      .where("turnNumber", "==", input.turn_number)
+      .limit(1)
+      .get();
+    const doc = snap.docs[0];
+    if (!doc) {
       return {
         available: false,
         turn_number: input.turn_number,
@@ -51,6 +48,13 @@ export const getTurnNarrativeTool = registerTool({
         outcome_summary: null,
       };
     }
+    const row = doc.data() as {
+      turnNumber: number;
+      playerMessage?: string | null;
+      narrativeText?: string | null;
+      intent?: unknown;
+      outcome?: unknown;
+    };
     const intentType =
       row.intent && typeof row.intent === "object" && "intent" in row.intent
         ? String((row.intent as { intent: unknown }).intent)
@@ -61,9 +65,9 @@ export const getTurnNarrativeTool = registerTool({
         : null;
     return {
       available: true,
-      turn_number: row.turn_number,
-      player_message: row.player_message,
-      narrative_text: row.narrative_text,
+      turn_number: row.turnNumber,
+      player_message: row.playerMessage ?? null,
+      narrative_text: row.narrativeText ?? null,
       intent: intentType,
       outcome_summary: outcomeSummary,
     };
