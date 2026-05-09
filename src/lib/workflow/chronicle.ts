@@ -1,6 +1,20 @@
 import { type ArcTrigger, type ChroniclerDeps, runChronicler } from "@/lib/agents/chronicler";
 import { incrementCostLedger } from "@/lib/budget";
 import type { Db } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import type { Firestore } from "firebase-admin/firestore";
+// Skip Firestore in tests (Drizzle mocks don't expect it); also tolerate
+// missing FIREBASE_PROJECT_ID outside test. authorizeCampaignAccess +
+// the chronicler tools fall back to ctx.db when ctx.firestore is
+// undefined.
+function tryGetFirestore(): Firestore | undefined {
+  if (process.env.NODE_ENV === "test") return undefined;
+  try {
+    return getFirebaseFirestore();
+  } catch {
+    return undefined;
+  }
+}
 import { decayHeat } from "@/lib/memory/decay";
 import { campaigns, turns } from "@/lib/state/schema";
 import type { AidmToolContext } from "@/lib/tools";
@@ -169,6 +183,7 @@ export async function chronicleTurn(
       campaignId: input.campaignId,
       userId: input.userId,
       db,
+      firestore: tryGetFirestore(),
       trace: deps.trace,
       logger,
       logContext,

@@ -1,17 +1,15 @@
-import { campaigns } from "@/lib/state/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
 /**
  * Returns the current world state of the campaign — location, situation,
- * arc phase, tension level. Stored as a jsonb blob on `campaigns.settings`
- * and updated by commands. Safe to read without a character being
- * populated.
+ * arc phase, tension level. Stored as a nested map on
+ * `campaigns/{id}.settings.world_state` and updated by commands. Safe
+ * to read without a character being populated.
  *
- * Real implementation (not a stub). When the `settings` jsonb doesn't
- * yet have a `world_state` key, returns a sentinel empty shape so
- * downstream callers can rely on the schema.
+ * When `settings` doesn't yet have a `world_state` key, returns a
+ * sentinel empty shape so downstream callers can rely on the schema.
  */
 const InputSchema = z.object({});
 
@@ -43,21 +41,12 @@ export const getWorldStateTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (_input, ctx) => {
-    const [row] = await ctx.db
-      .select({ settings: campaigns.settings })
-      .from(campaigns)
-      .where(
-        and(
-          eq(campaigns.id, ctx.campaignId),
-          eq(campaigns.userId, ctx.userId),
-          isNull(campaigns.deletedAt),
-        ),
-      )
-      .limit(1);
-    if (!row) return DEFAULT;
-    const settings = (row.settings ?? {}) as {
-      world_state?: Partial<OutShape>;
-    };
+    if (!ctx.firestore) return DEFAULT;
+    const snap = await ctx.firestore.collection(COL.campaigns).doc(ctx.campaignId).get();
+    if (!snap.exists) return DEFAULT;
+    const data = snap.data();
+    if (!data || data.ownerUid !== ctx.userId || data.deletedAt !== null) return DEFAULT;
+    const settings = (data.settings ?? {}) as { world_state?: Partial<OutShape> };
     const ws = settings.world_state ?? {};
     return {
       location: ws.location ?? null,

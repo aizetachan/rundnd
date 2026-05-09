@@ -6,6 +6,22 @@ import { type AgentLogger, defaultLogger } from "@/lib/agents/types";
 import { judgeOutcomeWithValidation } from "@/lib/agents/validator";
 import type { WorldBuilderFlag } from "@/lib/agents/world-builder";
 import type { Db } from "@/lib/db";
+import { getFirebaseFirestore } from "@/lib/firebase/admin";
+import type { Firestore } from "firebase-admin/firestore";
+// During M0.5 Fase 3 the workflow needs Firestore at runtime but the
+// Drizzle-mocked tests inject a fake db and don't expect Firestore. To
+// keep both paths working, skip Firestore in the test environment so
+// authorizeCampaignAccess + the chronicler tools fall back to ctx.db.
+// Catches the lazy-init throw too, so missing FIREBASE_PROJECT_ID is
+// still tolerated outside of test.
+function tryGetFirestore(): Firestore | undefined {
+  if (process.env.NODE_ENV === "test") return undefined;
+  try {
+    return getFirebaseFirestore();
+  } catch {
+    return undefined;
+  }
+}
 import {
   detectStaleConstructions,
   pickStyleDrift,
@@ -685,6 +701,7 @@ export async function* runTurn(
         campaignId: input.campaignId,
         userId: input.userId,
         db,
+        firestore: tryGetFirestore(),
         trace: deps.trace,
         logger,
         logContext,
@@ -921,6 +938,7 @@ export async function* runTurn(
       campaignId: input.campaignId,
       userId: input.userId,
       db,
+      firestore: tryGetFirestore(),
       trace: deps.trace,
       logger,
       logContext,

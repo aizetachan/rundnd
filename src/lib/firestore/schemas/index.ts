@@ -8,5 +8,9 @@
 
 export * from "./campaign";
 export * from "./character";
+export * from "./contextBlock";
+export * from "./faction";
+export * from "./location";
+export * from "./npc";
 export * from "./profile";
 export * from "./user";

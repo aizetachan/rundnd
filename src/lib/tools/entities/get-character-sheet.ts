@@ -1,5 +1,4 @@
-import { characters } from "@/lib/state/schema";
-import { eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -71,27 +70,23 @@ export const getCharacterSheetTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (_input, ctx) => {
-    const [row] = await ctx.db
-      .select({
-        name: characters.name,
-        concept: characters.concept,
-        powerTier: characters.powerTier,
-        sheet: characters.sheet,
-      })
-      .from(characters)
-      .where(eq(characters.campaignId, ctx.campaignId))
-      .limit(1);
-    if (!row) return EMPTY_OUTPUT;
-
-    // The sheet jsonb is whatever seed wrote. We trust the shape
-    // loosely — Zod validates at the tool boundary in the registry
-    // wrapper, so a malformed sheet surfaces there rather than here.
+    if (!ctx.firestore) return EMPTY_OUTPUT;
+    const snap = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.characters)
+      .limit(1)
+      .get();
+    if (snap.empty) return EMPTY_OUTPUT;
+    const doc = snap.docs[0];
+    if (!doc) return EMPTY_OUTPUT;
+    const row = doc.data();
     const sheet = (row.sheet ?? {}) as Partial<z.infer<typeof OutputSchema>>;
     return {
       available: true,
-      name: sheet.name ?? row.name,
-      concept: sheet.concept ?? row.concept,
-      power_tier: sheet.power_tier ?? row.powerTier,
+      name: sheet.name ?? row.name ?? null,
+      concept: sheet.concept ?? row.concept ?? null,
+      power_tier: sheet.power_tier ?? row.powerTier ?? null,
       stats: sheet.stats ?? null,
       abilities: sheet.abilities ?? [],
       inventory: sheet.inventory ?? [],

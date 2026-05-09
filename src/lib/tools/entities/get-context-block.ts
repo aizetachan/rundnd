@@ -1,6 +1,5 @@
-import { contextBlocks } from "@/lib/state/schema";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { ContextBlockType } from "@/lib/types/entities";
-import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -37,27 +36,22 @@ export const getContextBlockTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const [row] = await ctx.db
-      .select({
-        content: contextBlocks.content,
-        continuityChecklist: contextBlocks.continuityChecklist,
-        version: contextBlocks.version,
-        status: contextBlocks.status,
-        lastUpdatedTurn: contextBlocks.lastUpdatedTurn,
-      })
-      .from(contextBlocks)
-      .where(
-        and(
-          eq(contextBlocks.campaignId, ctx.campaignId),
-          eq(contextBlocks.blockType, input.block_type),
-          eq(contextBlocks.entityName, input.entity_name),
-        ),
-      )
-      .limit(1);
-    if (!row) return null;
+    if (!ctx.firestore) return null;
+    const snap = await ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.contextBlocks)
+      .where("blockType", "==", input.block_type)
+      .where("entityName", "==", input.entity_name)
+      .limit(1)
+      .get();
+    if (snap.empty) return null;
+    const doc = snap.docs[0];
+    if (!doc) return null;
+    const row = doc.data();
     return {
       content: row.content,
-      continuity_checklist: row.continuityChecklist as Record<string, unknown>,
+      continuity_checklist: (row.continuityChecklist ?? {}) as Record<string, unknown>,
       version: row.version,
       status: row.status,
       last_updated_turn: row.lastUpdatedTurn,

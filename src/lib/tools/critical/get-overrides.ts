@@ -1,5 +1,4 @@
-import { campaigns } from "@/lib/state/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -10,7 +9,7 @@ import { registerTool } from "../registry";
  * so KA can also query them directly when writing a scene where an
  * override's applicability isn't obvious from the per-turn context.
  *
- * Real implementation: reads from `campaigns.settings.overrides` jsonb.
+ * Reads from `campaigns/{id}.settings.overrides` (jsonb-equivalent map).
  */
 const OverrideSchema = z.object({
   id: z.string(),
@@ -39,21 +38,14 @@ export const getOverridesTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (_input, ctx) => {
-    const [row] = await ctx.db
-      .select({ settings: campaigns.settings })
-      .from(campaigns)
-      .where(
-        and(
-          eq(campaigns.id, ctx.campaignId),
-          eq(campaigns.userId, ctx.userId),
-          isNull(campaigns.deletedAt),
-        ),
-      )
-      .limit(1);
-    if (!row) return { overrides: [] };
-    const settings = (row.settings ?? {}) as {
-      overrides?: unknown;
-    };
+    if (!ctx.firestore) return { overrides: [] };
+    const snap = await ctx.firestore.collection(COL.campaigns).doc(ctx.campaignId).get();
+    if (!snap.exists) return { overrides: [] };
+    const data = snap.data();
+    if (!data || data.ownerUid !== ctx.userId || data.deletedAt !== null) {
+      return { overrides: [] };
+    }
+    const settings = (data.settings ?? {}) as { overrides?: unknown };
     const raw = settings.overrides;
     if (!Array.isArray(raw)) return { overrides: [] };
     // Tolerant parse — skip malformed entries rather than fail the call.

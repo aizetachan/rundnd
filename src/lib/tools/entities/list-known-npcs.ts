@@ -1,5 +1,4 @@
-import { npcs } from "@/lib/state/schema";
-import { and, asc, eq } from "drizzle-orm";
+import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
 
@@ -38,29 +37,26 @@ export const listKnownNpcsTool = registerTool({
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
-    const whereClause = input.include_transient
-      ? eq(npcs.campaignId, ctx.campaignId)
-      : and(eq(npcs.campaignId, ctx.campaignId), eq(npcs.isTransient, false));
-    const rows = await ctx.db
-      .select({
-        id: npcs.id,
-        name: npcs.name,
-        role: npcs.role,
-        personality: npcs.personality,
-      })
-      .from(npcs)
-      .where(whereClause)
-      .orderBy(asc(npcs.name))
-      .limit(200);
+    if (!ctx.firestore) return { npcs: [] };
+    const baseQuery = ctx.firestore
+      .collection(COL.campaigns)
+      .doc(ctx.campaignId)
+      .collection(CAMPAIGN_SUB.npcs);
+    const query = input.include_transient
+      ? baseQuery.orderBy("name", "asc").limit(200)
+      : baseQuery.where("isTransient", "==", false).orderBy("name", "asc").limit(200);
+    const snap = await query.get();
     return {
-      npcs: rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        role: r.role,
-        brief: r.personality || "(no personality inferred yet)",
-        // Affinity placeholder — M4 aggregates from relationship_events.
-        affinity: 0,
-      })),
+      npcs: snap.docs.map((d) => {
+        const r = d.data();
+        return {
+          id: d.id,
+          name: r.name,
+          role: r.role ?? null,
+          brief: r.personality || "(no personality inferred yet)",
+          affinity: 0,
+        };
+      }),
     };
   },
 });

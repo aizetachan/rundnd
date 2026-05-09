@@ -53,11 +53,101 @@ function fakeDb(rows: FakeRow[]): AidmToolContext["db"] {
   } as unknown as AidmToolContext["db"];
 }
 
+/**
+ * Fake Firestore that returns the campaign doc for `authorizeCampaignAccess`
+ * and works with the entities tools that read campaigns/{id} or its
+ * subcollections.
+ */
+function fakeFirestore(opts: {
+  campaign?: { ownerUid?: string; deletedAt?: Date | null; settings?: unknown } | null;
+  characterDocs?: Array<Record<string, unknown>>;
+  contextBlockDocs?: Array<Record<string, unknown>>;
+  npcDocs?: Array<Record<string, unknown>>;
+}): AidmToolContext["firestore"] {
+  const campaignMissing = opts.campaign === null;
+  const campaignData = campaignMissing
+    ? undefined
+    : {
+        ownerUid: opts.campaign?.ownerUid ?? "u-1",
+        deletedAt: opts.campaign?.deletedAt ?? null,
+        name: "test",
+        settings: opts.campaign?.settings ?? {},
+        phase: "playing",
+        profileRefs: [],
+        createdAt: new Date(),
+      };
+
+  const docFor = (col: string) => {
+    if (col === "characters") return opts.characterDocs ?? [];
+    if (col === "contextBlocks") return opts.contextBlockDocs ?? [];
+    if (col === "npcs") return opts.npcDocs ?? [];
+    return [];
+  };
+
+  function mkSubcol(col: string) {
+    const docs = docFor(col).map((d, i) => ({
+      id: `${col}-${i}`,
+      data: () => d,
+      exists: true,
+      ref: { collection: () => mkSubcol("__nested__") },
+    }));
+    const queryShape: Record<string, unknown> = {
+      where: () => queryShape,
+      orderBy: () => queryShape,
+      limit: () => queryShape,
+      get: async () => ({ empty: docs.length === 0, docs }),
+    };
+    return {
+      ...queryShape,
+      doc: () => ({
+        get: async () => ({ exists: docs[0] !== undefined, data: () => docs[0]?.data() }),
+        collection: mkSubcol,
+      }),
+      add: async () => ({ id: `${col}-new` }),
+    };
+  }
+
+  const campaignDocRef = {
+    id: "c-1",
+    get: async () => ({
+      id: "c-1",
+      exists: !campaignMissing,
+      data: () => campaignData,
+    }),
+    collection: (sub: string) => mkSubcol(sub),
+  };
+
+  return {
+    collection: (name: string) => {
+      if (name === "campaigns") {
+        return {
+          doc: () => campaignDocRef,
+          where: () => ({
+            where: () => ({
+              where: () => ({
+                limit: () => ({ get: async () => ({ empty: true, docs: [] }) }),
+              }),
+            }),
+          }),
+          add: async () => ({ id: "campaign-new" }),
+        };
+      }
+      return {
+        doc: () => ({
+          get: async () => ({ exists: false, data: () => undefined }),
+          collection: mkSubcol,
+        }),
+      };
+    },
+  } as unknown as AidmToolContext["firestore"];
+}
+
 function makeCtx(overrides: Partial<AidmToolContext> = {}): AidmToolContext {
   return {
     campaignId: "c-1",
     userId: "u-1",
     db: fakeDb([{ id: "c-1", userId: "u-1", name: "test", settings: {} }]),
+    firestore: fakeFirestore({}),
     ...overrides,
   };
 }
@@ -181,7 +271,7 @@ describe("tool registry — core infrastructure", () => {
     });
 
     it("authorizeCampaignAccess throws AidmAuthError when no row found", async () => {
-      const ctx = makeCtx({ db: fakeDb([]) });
+      const ctx = makeCtx({ firestore: fakeFirestore({ campaign: null }) });
       await expect(authorizeCampaignAccess(ctx)).rejects.toBeInstanceOf(AidmAuthError);
     });
   });
@@ -229,7 +319,7 @@ describe("tool registry — core infrastructure", () => {
         outputSchema: z.object({}),
         execute: async () => ({}),
       });
-      const ctx = makeCtx({ db: fakeDb([]) });
+      const ctx = makeCtx({ firestore: fakeFirestore({ campaign: null }) });
       await expect(invokeTool("echo", {}, ctx)).rejects.toBeInstanceOf(AidmAuthError);
     });
 
@@ -316,11 +406,8 @@ describe("tool registry — core infrastructure", () => {
     it("get_world_state returns populated shape when settings.world_state exists", async () => {
       const mod = await import("../index");
       const ctx = makeCtx({
-        db: fakeDb([
-          {
-            id: "c-1",
-            userId: "u-1",
-            name: "t",
+        firestore: fakeFirestore({
+          campaign: {
             settings: {
               world_state: {
                 location: "Mars",
@@ -328,7 +415,7 @@ describe("tool registry — core infrastructure", () => {
               },
             },
           },
-        ]),
+        }),
       });
       const result = (await mod.invokeTool("get_world_state", {}, ctx)) as {
         location: string | null;
@@ -347,11 +434,8 @@ describe("tool registry — core infrastructure", () => {
     it("get_overrides tolerates malformed entries without throwing", async () => {
       const mod = await import("../index");
       const ctx = makeCtx({
-        db: fakeDb([
-          {
-            id: "c-1",
-            userId: "u-1",
-            name: "t",
+        firestore: fakeFirestore({
+          campaign: {
             settings: {
               overrides: [
                 // valid
@@ -374,7 +458,7 @@ describe("tool registry — core infrastructure", () => {
               ],
             },
           },
-        ]),
+        }),
       });
       const result = (await mod.invokeTool("get_overrides", {}, ctx)) as {
         overrides: Array<{ id: string }>;

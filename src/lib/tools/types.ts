@@ -1,4 +1,5 @@
 import type { Db } from "@/lib/db";
+import type { Firestore } from "firebase-admin/firestore";
 import type { z } from "zod";
 
 /**
@@ -50,8 +51,11 @@ export interface AidmSpanHandle {
  * - `campaignId` + `userId`: authorization checked before the tool runs.
  *   A tool cannot read state from a campaign that isn't owned by the
  *   calling user.
- * - `db`: the Drizzle client. Tools query directly; no repository layer
- *   abstraction because this stays flat and testable.
+ * - `db`: the Drizzle client (DEPRECATED — being removed sub-commit by
+ *   sub-commit during the M0.5 Fase 3 migration). Once every tool reads
+ *   from `firestore` instead, this field goes away.
+ * - `firestore`: the Firebase Admin Firestore client. New canonical data
+ *   source. Tools migrate to read/write through this directly.
  * - `trace` (optional): when a Langfuse trace exists for the parent turn,
  *   the tool wraps its execute in a child span. Null-safe: tools run fine
  *   without a trace.
@@ -60,6 +64,14 @@ export interface AidmToolContext {
   campaignId: string;
   userId: string;
   db: Db;
+  /**
+   * Firebase Admin Firestore client. Optional during the M0.5 Fase 3
+   * migration: tests that mock the legacy Drizzle path don't need to
+   * supply it. Tools that have been migrated to Firestore depend on it
+   * and will throw at call time if it's missing — caller bug, not a
+   * silent failure.
+   */
+  firestore?: Firestore;
   trace?: AidmSpanHandle;
   /**
    * Structured logger for tool-layer observability. When present,
