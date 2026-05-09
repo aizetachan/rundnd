@@ -1,0 +1,72 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# production
+build/
+dist/
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# env
+.env
+.env*.local
+.env.development
+.env.production
+
+# typescript
+*.tsbuildinfo
+
+# vercel / railway
+.vercel
+.railway/
+
+# drizzle: commit migrations AND meta/ — the journal + snapshots track
+# migration state across environments. Drizzle fails on missing meta.
+
+# testing
+coverage/
+.vitest-cache/
+
+# editors
+.vscode/
+.idea/
+*.swp
+
+# v3 reference — lives on the v3 branch of this repo; not mirrored on master
+reference/
+
+# local tooling
+.claude/
+
+# MockLLM — auto-captured fixtures (review before committing)
+evals/fixtures/llm/recorded/*.yaml
+
+# Eval harness (Commit 8)
+# - latest.json is the output of `pnpm evals`; CI regenerates per run
+# - manual-reviews/ holds judge.ts output (prose scoring from Haiku
+#   calls invoked with the user's explicit approval); never committed
+evals/latest.json
+evals/manual-reviews/
+
+# clerk configuration (can include secrets)
+/.clerk/
+
+# Firebase service account credentials (private key — never commit)
+*-service-account*.json
+*-firebase-adminsdk-*.json
+.firebase/
