@@ -34,13 +34,21 @@ const Body = z.object({
 
 const SESSION_DURATION_MS = 60 * 60 * 24 * 14 * 1000; // 14 days — Firebase max for session cookies
 
+// Detail strings from Firebase Admin (e.g. "ID token has expired" vs
+// "ID token has invalid signature") are useful in dev but act as a
+// validity oracle in prod. Gate the `detail` field accordingly — the
+// client only consumes `body.error` anyway.
+const isDev = process.env.NODE_ENV !== "production";
+
 export async function POST(req: NextRequest) {
   let body: z.infer<typeof Body>;
   try {
     body = Body.parse(await req.json());
   } catch (err) {
     return NextResponse.json(
-      { error: "invalid_body", detail: err instanceof Error ? err.message : String(err) },
+      isDev
+        ? { error: "invalid_body", detail: err instanceof Error ? err.message : String(err) }
+        : { error: "invalid_body" },
       { status: 400 },
     );
   }
@@ -62,7 +70,9 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     return NextResponse.json(
-      { error: "invalid_token", detail: err instanceof Error ? err.message : String(err) },
+      isDev
+        ? { error: "invalid_token", detail: err instanceof Error ? err.message : String(err) }
+        : { error: "invalid_token" },
       { status: 401 },
     );
   }

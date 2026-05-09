@@ -20,7 +20,12 @@ import { type FormEvent, useState } from "react";
 export function SignInForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const redirectTo = params.get("redirect") ?? "/campaigns";
+  // The `redirect` param is attacker-controlled — only accept relative paths
+  // anchored at root, otherwise an attacker could phish ?redirect=https://evil.com
+  // to bounce a freshly-signed-in user off our domain.
+  const rawRedirect = params.get("redirect") ?? "/campaigns";
+  const redirectTo =
+    rawRedirect.startsWith("/") && !rawRedirect.startsWith("//") ? rawRedirect : "/campaigns";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
