@@ -1,4 +1,5 @@
 import { type RenderBlocksInput, renderKaBlocks } from "@/lib/ka/blocks";
+import { resolveClaudeCodeBinary } from "@/lib/llm/claude-binary";
 import { getQueryFn } from "@/lib/llm/mock/runtime";
 import { getPrompt } from "@/lib/prompts";
 import type { CampaignProviderConfig } from "@/lib/providers";
@@ -302,6 +303,13 @@ export async function* runKeyAnimator(
     effort: EFFORT_DEFAULT,
     abortController,
     env: process.env,
+    // Explicit binary path — the SDK's own lookup fails on App Hosting
+    // when the buildpack ships an image without the linux-x64 native
+    // package fully resolved. Resolving manually + passing the path
+    // sidesteps that. Undefined means the SDK falls back to its own
+    // search (which surfaces the "Native CLI binary not found" error
+    // if neither path yields a binary).
+    pathToClaudeCodeExecutable: resolveClaudeCodeBinary(),
   };
 
   const start = Date.now();

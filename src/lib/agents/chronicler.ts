@@ -1,3 +1,4 @@
+import { resolveClaudeCodeBinary } from "@/lib/llm/claude-binary";
 import { getQueryFn } from "@/lib/llm/mock/runtime";
 import { getPrompt } from "@/lib/prompts";
 import type { CampaignProviderConfig } from "@/lib/providers";
@@ -210,6 +211,9 @@ export async function runChronicler(
     includePartialMessages: false,
     abortController,
     env: process.env,
+    // Match key-animator: explicit binary path so App Hosting's
+    // imperfect optional-dep installation doesn't crash the SDK.
+    pathToClaudeCodeExecutable: resolveClaudeCodeBinary(),
   };
 
   const start = Date.now();
