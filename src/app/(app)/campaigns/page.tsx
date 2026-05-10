@@ -47,18 +47,30 @@ export default async function CampaignsPage() {
 
   const greeting = user.email ?? user.id;
 
+  // Hide SZ-phase campaigns from the playable list — they're not yet
+  // playable. Sub 5 will surface a "Continue Session Zero" affordance
+  // for them; until then they're reachable via the `/sz` CTA below.
+  const playable = rows.filter((c) => c.phase !== "session_zero" && c.phase !== "sz");
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-3xl font-semibold tracking-tight">hello, {greeting}</h1>
 
-      {rows.length === 0 ? (
+      <Link
+        href="/sz"
+        className="inline-flex w-fit items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-primary text-sm hover:bg-primary/20"
+      >
+        + Start a new campaign
+      </Link>
+
+      {playable.length === 0 ? (
         <p className="text-muted-foreground">
-          Your campaign is still being seeded. Refresh in a moment — the Bebop demo campaign should
-          appear shortly after your first sign-in.
+          No playable campaigns yet — start one above. The conductor will walk you through Session
+          Zero and hand you off to the first scene.
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
-          {rows.map((c) => (
+          {playable.map((c) => (
             <li
               key={c.id}
               className="flex items-stretch gap-2 rounded-lg border hover:border-foreground/20"

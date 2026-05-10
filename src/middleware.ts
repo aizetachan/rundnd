@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 
 // Routes under the (app) route group require auth. Everything else — landing
 // page, sign-in/sign-up, health/ready, auth API endpoints — is public.
-const PROTECTED_PREFIXES = ["/campaigns", "/settings", "/admin", "/account"] as const;
+const PROTECTED_PREFIXES = ["/campaigns", "/settings", "/admin", "/account", "/sz"] as const;
 
 function isProtected(pathname: string): boolean {
   return PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
