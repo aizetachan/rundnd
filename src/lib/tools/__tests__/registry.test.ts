@@ -169,6 +169,7 @@ describe("tool registry — core infrastructure", () => {
           "propose_canonicality_mode",
           "propose_character_option",
           "search_profile_library",
+          "spawn_subagent",
         ].sort(),
       );
     });
@@ -224,6 +225,7 @@ describe("tool registry — core infrastructure", () => {
           "propose_canonicality_mode",
           "propose_character_option",
           "search_profile_library",
+          "spawn_subagent",
         ].sort(),
       );
     });
