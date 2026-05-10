@@ -15,6 +15,7 @@ export * from "./profile";
 export * from "./relationshipEvent";
 export * from "./ruleLibraryChunk";
 export * from "./semanticMemory";
+export * from "./sessionZero";
 export * from "./spotlightDebt";
 export * from "./turn";
 export * from "./user";

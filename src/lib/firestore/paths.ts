@@ -58,4 +58,14 @@ export const CAMPAIGN_SUB = {
   directorNotes: "directorNotes",
   spotlightDebt: "spotlightDebt",
   arcPlanHistory: "arcPlanHistory",
+  /**
+   * Session Zero state. One doc per campaign at id "state". Optional
+   * companion subcollection `openingStatePackages` holds the versioned
+   * HandoffCompiler outputs (created when SZ completes / is redone).
+   */
+  sessionZero: "sessionZero",
+  openingStatePackages: "openingStatePackages",
 } as const;
+
+/** Single-doc id under `campaigns/{id}/sessionZero/`. */
+export const SESSION_ZERO_DOC_ID = "state";

@@ -2,5 +2,7 @@ export * from "./arc";
 export * from "./campaign";
 export * from "./composition";
 export * from "./dna";
+export * from "./opening-state-package";
 export * from "./profile";
+export * from "./session-zero";
 export * from "./turn";
