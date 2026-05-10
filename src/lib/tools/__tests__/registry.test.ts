@@ -162,6 +162,12 @@ describe("tool registry — core infrastructure", () => {
           "list_known_npcs",
           "recall_scene",
           "search_memory",
+          // SessionZeroConductor tools (M2 Wave A)
+          "ask_clarifying_question",
+          "commit_field",
+          "finalize_session_zero",
+          "propose_canonicality_mode",
+          "propose_character_option",
         ].sort(),
       );
     });
@@ -205,6 +211,19 @@ describe("tool registry — core infrastructure", () => {
       );
       expect(listToolsByLayer("ambient")).toEqual([]);
       expect(listToolsByLayer("working")).toEqual([]);
+      expect(
+        listToolsByLayer("session_zero")
+          .map((t) => t.name)
+          .sort(),
+      ).toEqual(
+        [
+          "ask_clarifying_question",
+          "commit_field",
+          "finalize_session_zero",
+          "propose_canonicality_mode",
+          "propose_character_option",
+        ].sort(),
+      );
     });
 
     it("duplicate registration throws", async () => {

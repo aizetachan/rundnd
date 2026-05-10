@@ -37,9 +37,7 @@ export async function getAlgoliaSearch(): Promise<ReturnType<AlgoliaClient>> {
   const appId = process.env.NEXT_PUBLIC_ALGOLIA_APP_ID;
   const searchKey = process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_KEY;
   if (!appId || !searchKey) {
-    throw new Error(
-      "NEXT_PUBLIC_ALGOLIA_APP_ID / NEXT_PUBLIC_ALGOLIA_SEARCH_KEY not configured",
-    );
+    throw new Error("NEXT_PUBLIC_ALGOLIA_APP_ID / NEXT_PUBLIC_ALGOLIA_SEARCH_KEY not configured");
   }
   const algoliasearch = await loadSdk();
   _search = algoliasearch(appId, searchKey);

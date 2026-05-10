@@ -15,11 +15,7 @@ import { CanonicalityMode } from "./session-zero";
  * record (Firestore doc), not in this schema.
  */
 
-export const HandoffStatus = z.enum([
-  "ready",
-  "warnings_only",
-  "blocked",
-]);
+export const HandoffStatus = z.enum(["ready", "warnings_only", "blocked"]);
 export type HandoffStatus = z.infer<typeof HandoffStatus>;
 
 export const PackageMetadata = z.object({

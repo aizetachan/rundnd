@@ -27,7 +27,8 @@ export type AidmToolLayer =
   | "voice" // Director's journal
   | "arc" // arc plan + foreshadowing causal graph
   | "critical" // sacred: SZ facts, player overrides
-  | "entities"; // active-state: character, world, NPCs
+  | "entities" // active-state: character, world, NPCs
+  | "session_zero"; // SessionZeroConductor surface (not a cognitive layer; KA never mounts it)
 
 /**
  * Opaque handle to a Langfuse trace or span. Designed to accept the real

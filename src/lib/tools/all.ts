@@ -46,5 +46,13 @@ import "./episodic/get-recent-episodes";
 import "./episodic/get-turn-narrative";
 import "./episodic/recall-scene";
 import "./semantic/search-memory";
+// Session Zero conductor tools (M2 Wave A sub 2). Layer: session_zero —
+// not a cognitive memory layer; mounted only by the SessionZeroConductor
+// via buildSessionZeroMcpServers, never by KA.
+import "./sz/ask-clarifying-question";
+import "./sz/commit-field";
+import "./sz/finalize-session-zero";
+import "./sz/propose-canonicality-mode";
+import "./sz/propose-character-option";
 import "./voice/get-voice-exemplars-by-beat-type";
 import "./voice/get-voice-patterns";

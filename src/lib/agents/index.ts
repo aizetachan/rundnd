@@ -113,6 +113,16 @@ export {
   ValidatorOutput,
 } from "./validator";
 
+// --- Session Zero conductor (M2 Wave A) ---
+export {
+  runSessionZeroConductor,
+  type SessionZeroConductorDeps,
+  type SessionZeroConductorEvent,
+  type SessionZeroConductorInput,
+  type SessionZeroConductorYieldFinal,
+  type SessionZeroConductorYieldText,
+} from "./session-zero-conductor";
+
 // --- Shared types ---
 export {
   defaultLogger,

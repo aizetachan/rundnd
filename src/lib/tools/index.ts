@@ -1,6 +1,6 @@
 import "./all"; // side-effect: register every tool in the flat registry
 
-export { buildMcpServers, LAYER_TO_MCP_ID } from "./mcp-servers";
+export { buildMcpServers, buildSessionZeroMcpServers, LAYER_TO_MCP_ID } from "./mcp-servers";
 export {
   authorizeCampaignAccess,
   clearRegistryForTesting,

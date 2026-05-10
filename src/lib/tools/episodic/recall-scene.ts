@@ -1,5 +1,5 @@
-import { searchTurns } from "@/lib/algolia/turn-index";
 import { isAlgoliaConfigured } from "@/lib/algolia/client";
+import { searchTurns } from "@/lib/algolia/turn-index";
 import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import type { Query } from "firebase-admin/firestore";
 import { z } from "zod";
@@ -74,9 +74,7 @@ export const recallSceneTool = registerTool({
         ctx.campaignId,
         input.keyword,
         input.limit,
-        input.turn_range
-          ? { start: input.turn_range.min, end: input.turn_range.max }
-          : undefined,
+        input.turn_range ? { start: input.turn_range.min, end: input.turn_range.max } : undefined,
       );
       return {
         hits: hits.map((h) => ({

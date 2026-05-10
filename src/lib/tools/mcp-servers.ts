@@ -36,7 +36,28 @@ const LAYER_TO_MCP_ID: Record<AidmToolLayer, string> = {
   arc: "aidm-arc",
   critical: "aidm-critical",
   entities: "aidm-entities",
+  session_zero: "aidm-session-zero",
 };
+
+/**
+ * The eight cognitive-memory + entities layers KA mounts. `session_zero`
+ * is intentionally excluded — it's the SessionZeroConductor's surface
+ * (M2 Wave A), not a cognitive layer KA reasons over during gameplay.
+ * The conductor mounts it via `buildSessionZeroMcpServers` instead.
+ */
+const KA_LAYERS: AidmToolLayer[] = [
+  "ambient",
+  "working",
+  "episodic",
+  "semantic",
+  "voice",
+  "arc",
+  "critical",
+  "entities",
+];
+
+/** The single layer the SessionZeroConductor mounts. */
+const SESSION_ZERO_LAYERS: AidmToolLayer[] = ["session_zero"];
 
 /**
  * Which tool names to surface in each MCP server. Most tools live in one
@@ -101,25 +122,22 @@ function toSdkTool(spec: AidmToolSpec, ctx: AidmToolContext): ReturnType<typeof 
 }
 
 /**
- * Build all eight MCP servers for a specific turn context.
- * Returns the shape Claude Agent SDK expects as its `mcpServers` config
- * (keyed by server id).
- *
- * `aidm-ambient` and `aidm-working` currently have no callable tools
- * (§9.0 — they manifest via Block 1 rendering and Block 3 window
- * respectively). They're still returned for completeness so KA's Agent
- * SDK session enumerates the same eight layers the rest of the codebase
- * references — empty-server is a valid state.
+ * Internal builder. Mounts an MCP server per layer in `layers`, plus any
+ * cross-layer surfaces declared for those layers. `aidm-ambient` and
+ * `aidm-working` currently have no callable tools (§9.0 — they manifest
+ * via Block 1 rendering and Block 3 window respectively); they're still
+ * returned for completeness so the agent enumerates the same layers the
+ * rest of the codebase references — empty-server is a valid state.
  */
-export function buildMcpServers(
+function buildMcpServersForLayers(
   ctx: AidmToolContext,
+  layers: AidmToolLayer[],
 ): Record<string, McpSdkServerConfigWithInstance> {
   const all = listTools();
   const result: Record<string, McpSdkServerConfigWithInstance> = {};
 
-  for (const [layer, serverId] of Object.entries(LAYER_TO_MCP_ID) as Array<
-    [AidmToolLayer, string]
-  >) {
+  for (const layer of layers) {
+    const serverId = LAYER_TO_MCP_ID[layer];
     const native = listToolsByLayer(layer);
     const crossNames = CROSS_LAYER_SURFACES[layer] ?? [];
     const cross = all.filter((t) => crossNames.includes(t.name) && t.layer !== layer);
@@ -133,6 +151,32 @@ export function buildMcpServers(
   }
 
   return result;
+}
+
+/**
+ * Build the eight MCP servers KA mounts on its Agent SDK session for a
+ * gameplay turn — one per cognitive-memory layer plus `aidm-entities`.
+ * Excludes `aidm-session-zero` by design (that surface is the
+ * SessionZeroConductor's, not KA's).
+ */
+export function buildMcpServers(
+  ctx: AidmToolContext,
+): Record<string, McpSdkServerConfigWithInstance> {
+  return buildMcpServersForLayers(ctx, KA_LAYERS);
+}
+
+/**
+ * Build the single MCP server the SessionZeroConductor mounts:
+ * `aidm-session-zero`, containing the five Wave A tools
+ * (propose_character_option, commit_field, ask_clarifying_question,
+ * finalize_session_zero, propose_canonicality_mode). KA never sees this
+ * surface; conversely the conductor never sees KA's eight cognitive
+ * layers — they're separate orchestrations against the same campaign.
+ */
+export function buildSessionZeroMcpServers(
+  ctx: AidmToolContext,
+): Record<string, McpSdkServerConfigWithInstance> {
+  return buildMcpServersForLayers(ctx, SESSION_ZERO_LAYERS);
 }
 
 export { LAYER_TO_MCP_ID };
