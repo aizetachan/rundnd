@@ -2,9 +2,10 @@
 
 import { BudgetIndicator } from "@/components/budget-indicator";
 import { useSessionZeroStream } from "@/hooks/use-session-zero-stream";
+import { abandonCampaign, redoSessionZero } from "@/lib/session-zero/actions";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 interface PriorMessage {
   role: "user" | "conductor" | "system";
@@ -32,6 +33,10 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
   const [input, setInput] = useState("");
   const [committed, setCommitted] = useState<PriorMessage[]>(priorHistory);
   const [budgetRefreshKey, setBudgetRefreshKey] = useState(0);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [isActionPending, startActionTransition] = useTransition();
+  const [confirmingAbandon, setConfirmingAbandon] = useState(false);
+  const [confirmingRedo, setConfirmingRedo] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
@@ -73,6 +78,11 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
   const submit = async () => {
     const message = input.trim();
     if (!message || streaming) return;
+    // Sending a message implies the player isn't acting on a pending
+    // destructive confirm — clear both so a stray click after the
+    // turn completes doesn't fire a stale soft-delete.
+    setConfirmingAbandon(false);
+    setConfirmingRedo(false);
     pendingMessageRef.current = message;
     setInput("");
     await send(message);
@@ -108,17 +118,80 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
   // we hide them in the chat feed.
   const visibleHistory = committed.filter((m) => m.text.length > 0);
 
+  const onRedo = () => {
+    setActionError(null);
+    if (!confirmingRedo) {
+      setConfirmingAbandon(false);
+      setConfirmingRedo(true);
+      return;
+    }
+    startActionTransition(async () => {
+      const result = await redoSessionZero(campaignId);
+      if (!result.ok) {
+        setActionError(result.message);
+        setConfirmingRedo(false);
+        return;
+      }
+      router.replace(`/sz/${result.data?.newCampaignId ?? ""}`);
+    });
+  };
+
+  const onAbandon = () => {
+    setActionError(null);
+    if (!confirmingAbandon) {
+      setConfirmingRedo(false);
+      setConfirmingAbandon(true);
+      return;
+    }
+    startActionTransition(async () => {
+      const result = await abandonCampaign(campaignId);
+      if (!result.ok) {
+        setActionError(result.message);
+        setConfirmingAbandon(false);
+        return;
+      }
+      router.replace("/campaigns");
+    });
+  };
+
   return (
     <div className="flex h-[calc(100vh-8rem)] flex-col gap-4">
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold tracking-tight">Session Zero</h1>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 text-sm">
           <BudgetIndicator refreshKey={budgetRefreshKey} />
-          <Link href="/campaigns" className="text-muted-foreground text-sm hover:text-foreground">
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={isActionPending || streaming}
+            className="rounded-md border px-3 py-1.5 text-muted-foreground text-xs hover:bg-muted/40 hover:text-foreground disabled:opacity-50"
+            title="Discard this conversation and start over with a fresh campaign."
+          >
+            {confirmingRedo ? "confirm restart?" : "start over"}
+          </button>
+          <button
+            type="button"
+            onClick={onAbandon}
+            disabled={isActionPending || streaming}
+            className={
+              confirmingAbandon
+                ? "rounded-md border border-destructive/40 px-3 py-1.5 text-destructive text-xs hover:bg-destructive/10 disabled:opacity-50"
+                : "rounded-md border px-3 py-1.5 text-muted-foreground text-xs hover:bg-muted/40 hover:text-foreground disabled:opacity-50"
+            }
+          >
+            {confirmingAbandon ? "confirm abandon?" : "abandon"}
+          </button>
+          <Link href="/campaigns" className="text-muted-foreground hover:text-foreground">
             campaigns
           </Link>
         </div>
       </header>
+
+      {actionError ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive text-sm">
+          {actionError}
+        </div>
+      ) : null}
 
       <RequirementsBar met={hardRequirementsMet} />
 

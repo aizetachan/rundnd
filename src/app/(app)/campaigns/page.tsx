@@ -4,6 +4,7 @@ import { COL } from "@/lib/firestore";
 import { ensureUserSeeded } from "@/lib/seed/ensure-seeded";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import AbandonButton from "./abandon-button";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,12 +25,6 @@ export default async function CampaignsPage() {
     });
   }
 
-  // Firestore can't combine `==` and `is null` filters cleanly without an
-  // index that explicitly stores the null. The `deletedAt == null`
-  // ordering is required by ensureUserSeeded which writes the field
-  // explicitly. Composite index needs (ownerUid asc, deletedAt asc,
-  // createdAt desc) for this query — declared in firestore.indexes.json
-  // (or auto-suggested by the console on first run).
   const snap = await getFirebaseFirestore()
     .collection(COL.campaigns)
     .where("ownerUid", "==", user.id)
@@ -47,9 +42,7 @@ export default async function CampaignsPage() {
 
   const greeting = user.email ?? user.id;
 
-  // Hide SZ-phase campaigns from the playable list — they're not yet
-  // playable. Sub 5 will surface a "Continue Session Zero" affordance
-  // for them; until then they're reachable via the `/sz` CTA below.
+  const inFlightSz = rows.filter((c) => c.phase === "session_zero" || c.phase === "sz");
   const playable = rows.filter((c) => c.phase !== "session_zero" && c.phase !== "sz");
 
   return (
@@ -63,38 +56,74 @@ export default async function CampaignsPage() {
         + Start a new campaign
       </Link>
 
-      {playable.length === 0 ? (
+      {inFlightSz.length > 0 ? (
+        <section className="flex flex-col gap-2">
+          <h2 className="font-medium text-muted-foreground text-sm uppercase tracking-wider">
+            In-flight Session Zero
+          </h2>
+          <ul className="flex flex-col gap-2">
+            {inFlightSz.map((c) => (
+              <li
+                key={c.id}
+                className="flex items-stretch gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 hover:border-amber-500/50"
+              >
+                <Link
+                  href={`/sz/${c.id}`}
+                  className="flex flex-1 items-center justify-between p-4 hover:bg-amber-500/10"
+                >
+                  <span className="font-medium">{c.name || "(untitled — Session Zero)"}</span>
+                  <span className="text-amber-200/80 text-xs uppercase tracking-wider">
+                    continue
+                  </span>
+                </Link>
+                <AbandonButton campaignId={c.id} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {playable.length === 0 && inFlightSz.length === 0 ? (
         <p className="text-muted-foreground">
           No playable campaigns yet — start one above. The conductor will walk you through Session
           Zero and hand you off to the first scene.
         </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {playable.map((c) => (
-            <li
-              key={c.id}
-              className="flex items-stretch gap-2 rounded-lg border hover:border-foreground/20"
-            >
-              <Link
-                href={`/campaigns/${c.id}/play`}
-                className="flex flex-1 items-center justify-between p-4 hover:bg-muted/40"
+      ) : null}
+
+      {playable.length > 0 ? (
+        <section className="flex flex-col gap-2">
+          {inFlightSz.length > 0 ? (
+            <h2 className="font-medium text-muted-foreground text-sm uppercase tracking-wider">
+              Playing
+            </h2>
+          ) : null}
+          <ul className="flex flex-col gap-2">
+            {playable.map((c) => (
+              <li
+                key={c.id}
+                className="flex items-stretch gap-2 rounded-lg border hover:border-foreground/20"
               >
-                <span className="font-medium">{c.name}</span>
-                <span className="text-muted-foreground text-xs uppercase tracking-wider">
-                  {c.phase}
-                </span>
-              </Link>
-              <Link
-                href={`/campaigns/${c.id}/settings`}
-                className="flex items-center border-l px-4 text-muted-foreground text-xs hover:bg-muted/40 hover:text-foreground"
-                aria-label={`Settings for ${c.name}`}
-              >
-                settings
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
+                <Link
+                  href={`/campaigns/${c.id}/play`}
+                  className="flex flex-1 items-center justify-between p-4 hover:bg-muted/40"
+                >
+                  <span className="font-medium">{c.name}</span>
+                  <span className="text-muted-foreground text-xs uppercase tracking-wider">
+                    {c.phase}
+                  </span>
+                </Link>
+                <Link
+                  href={`/campaigns/${c.id}/settings`}
+                  className="flex items-center border-l px-4 text-muted-foreground text-xs hover:bg-muted/40 hover:text-foreground"
+                  aria-label={`Settings for ${c.name}`}
+                >
+                  settings
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }
