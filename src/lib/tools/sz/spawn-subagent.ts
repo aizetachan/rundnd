@@ -1,7 +1,7 @@
 import { runProfileResearcherB } from "@/lib/agents/profile-researcher-b";
 import { indexProfile } from "@/lib/algolia/profile-index";
 import { COL } from "@/lib/firestore";
-import { normalizeAnimeResearchOutput } from "@/lib/research";
+import { normalizeAnimeResearchOutput, searchFranchise } from "@/lib/research";
 import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
@@ -166,16 +166,57 @@ export const spawnSubagentTool = registerTool({
       return result;
     }
 
-    // Stub paths for sub 5 (disambiguation) and sub 8 (hybrid_synthesis).
-    // Returns ok=false with a sentinel summary; the conductor falls back
-    // to its in-chat alternative.
+    if (input.type === "disambiguation") {
+      // AniList franchise-graph lookup. Returns up to 6 candidates with
+      // SEQUEL/PREQUEL chains collapsed (canonical-first) and SPIN_OFF/
+      // ALTERNATIVE surfaced as distinct. Caller (conductor) presents
+      // them as a numbered list and asks the player to pick. The
+      // player's pick comes back in a future spawn_subagent call as
+      // `selected_anilist_id`, paired with type="research".
+      let candidates: import("@/lib/research").FranchiseCandidate[] = [];
+      let summary: string;
+      try {
+        candidates = await searchFranchise(input.query, 6);
+        summary = candidates.length
+          ? `Found ${candidates.length} candidate(s) for "${input.query}". Present them to the player + collect a pick before researching.`
+          : `AniList returned no matches for "${input.query}". Conductor should ask the player to clarify or rephrase.`;
+      } catch (err) {
+        summary = `AniList lookup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }. Conductor can fall back to research-without-disambiguation (the LLM picks).`;
+      }
+      const result = {
+        ok: candidates.length > 0,
+        type: input.type,
+        slug: null,
+        summary,
+        telemetry: {
+          wall_ms: Date.now() - start,
+          cost_usd: 0,
+          research_confidence: null,
+        },
+        // The candidates field isn't part of the Zod output schema —
+        // exposed via conversation_history's tool_call.result so the
+        // UI can render them. Adding it as an extra property is OK
+        // because Zod's strict() isn't on this output schema.
+        candidates,
+      };
+      await appendConductorToolCall({
+        firestore: ctx.firestore,
+        campaignId: ctx.campaignId,
+        toolName: "spawn_subagent",
+        args: input,
+        result,
+      });
+      return result;
+    }
+
+    // Stub for sub 8 (hybrid_synthesis).
     const result = {
       ok: false as const,
       type: input.type,
       slug: null,
-      summary: `${input.type} subagent not yet implemented (planned for sub ${
-        input.type === "disambiguation" ? 5 : 8
-      }). The conductor should fall back to in-chat alternatives.`,
+      summary: `${input.type} subagent not yet implemented (planned for sub 8). The conductor should fall back to in-chat alternatives.`,
       telemetry: {
         wall_ms: Date.now() - start,
         cost_usd: 0,
