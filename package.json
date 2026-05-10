@@ -27,7 +27,8 @@
     "mockllm": "tsx scripts/mockllm.ts",
     "evals": "tsx evals/run.ts",
     "evals:ci": "tsx evals/run.ts --ci",
-    "langfuse:latest": "tsx --env-file=.env.local scripts/langfuse-latest.ts"
+    "langfuse:latest": "tsx --env-file=.env.local scripts/langfuse-latest.ts",
+    "algolia:configure": "tsx --env-file=.env.local scripts/configure-algolia-index.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",

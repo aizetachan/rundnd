@@ -20,7 +20,7 @@ runConfig:
 env:
   # --- Public client config (NEXT_PUBLIC_*) — inlined into the browser bundle at build time ---
   - variable: NEXT_PUBLIC_APP_URL
-    value: "https://rundnd-fd1dc.web.app"
+    value: "https://rundnd--rundnd-fd1dc.us-central1.hosted.app"
     availability:
       - BUILD
       - RUNTIME
@@ -82,6 +82,10 @@ env:
       - RUNTIME
 
   # --- Algolia (full-text search for recall_scene) ---
+  # NEXT_PUBLIC_* values end up in the client bundle by design (Algolia
+  # AppID + Search-Only Key are public), so they're declared as plain
+  # values — using `secret:` for them would imply a privacy guarantee
+  # that the bundle inlining doesn't actually keep.
   - variable: ALGOLIA_APP_ID
     secret: ALGOLIA_APP_ID
     availability:
@@ -91,12 +95,12 @@ env:
     availability:
       - RUNTIME
   - variable: NEXT_PUBLIC_ALGOLIA_APP_ID
-    secret: NEXT_PUBLIC_ALGOLIA_APP_ID
+    value: "VZNGRG95KH"
     availability:
       - BUILD
       - RUNTIME
   - variable: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
-    secret: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+    value: "f2f98e8ae9118ef2030d4900b5586df5"
     availability:
       - BUILD
       - RUNTIME

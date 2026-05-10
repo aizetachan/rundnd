@@ -134,9 +134,15 @@ export function resolveClaudeCodeBinary(): string | undefined {
   if (cached !== null) return cached;
   cached = tryRequireResolve() ?? tryFilesystemWalk();
   if (cached) {
-    console.log("[claude-binary] resolved:", cached);
+    // Debug-level so cold-start logs don't get noisy in App Hosting once
+    // resolution is stable. Promote back to log if a regression appears.
+    console.debug("[claude-binary] resolved:", cached);
   } else {
-    console.warn("[claude-binary] could not resolve native CLI binary on", process.platform, process.arch);
+    console.warn(
+      "[claude-binary] could not resolve native CLI binary on",
+      process.platform,
+      process.arch,
+    );
   }
   return cached;
 }

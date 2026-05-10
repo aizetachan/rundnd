@@ -1,5 +1,5 @@
 import { generateContextBlock } from "@/lib/agents";
-import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
+import { CAMPAIGN_SUB, COL, safeNameId } from "@/lib/firestore";
 import { anthropicFallbackConfig } from "@/lib/providers";
 import { ContextBlockType } from "@/lib/types/entities";
 import { FieldValue } from "firebase-admin/firestore";
@@ -13,25 +13,25 @@ import { registerTool } from "../registry";
  * significant revelation, new NPC becoming load-bearing.
  *
  * Flow:
- *   1. Check for an existing block (same campaign, block_type,
- *      entity_name). If present, treat its content as prior_version.
- *   2. Gather structured entity_data from the appropriate catalog
- *      subcollection (npcs for "npc", and other entity kinds backfill
- *      as those catalogs mature).
- *   3. Invoke generateContextBlock with the collected context.
- *   4. Upsert: existing → version+1; new → version=1.
+ *   1. Resolve the deterministic doc id from (block_type, entity_name).
+ *      Two concurrent writers converge on the same doc id rather than
+ *      racing to create version=1 twice.
+ *   2. Read the existing block (if any). Use its content as
+ *      prior_version for the generator.
+ *   3. Gather structured entity_data from the appropriate catalog
+ *      subcollection (npcs for "npc"; other kinds backfill as those
+ *      catalogs mature).
+ *   4. Invoke generateContextBlock — slow LLM call, kept OUTSIDE the
+ *      transaction so write contention doesn't pin LLM latency.
+ *   5. Inside a runTransaction: re-read the doc, bump version, write.
+ *     The atomic read-then-write closes the race the doc-id alone
+ *     can't (two writers seeing version=1, both writing version=2).
  *
  * This is the sole write path for context_blocks at M1. No other tool
  * should insert directly — centralizing through the generator keeps
  * content quality consistent.
  *
  * Phase 3C of v3-audit closure (docs/plans/v3-audit-closure.md §3.3).
- *
- * Implementation: Firestore has no compound unique index on
- * (blockType, entityName). We resolve the existing doc with a
- * .where().where().limit(1) query and run the version-bump in a
- * transaction so two concurrent writers can't both create version=1
- * docs.
  */
 
 const InputSchema = z.object({
@@ -68,19 +68,17 @@ export const updateContextBlockTool = registerTool({
       .doc(ctx.campaignId)
       .collection(CAMPAIGN_SUB.contextBlocks);
 
-    // Locate the existing block (if any) for this (block_type, entity_name).
-    const existingSnap = await blocksCol
-      .where("blockType", "==", input.block_type)
-      .where("entityName", "==", input.entity_name)
-      .limit(1)
-      .get();
-    const existingDoc = existingSnap.docs[0] ?? null;
-    const existingData = existingDoc?.data() ?? null;
+    // Deterministic doc id from (block_type, entity_name) — two writers
+    // for the same entity converge on this doc instead of racing.
+    const docId = safeNameId(`${input.block_type}__${input.entity_name}`);
+    const blockRef = blocksCol.doc(docId);
+
+    const existingSnap = await blockRef.get();
+    const existingData = existingSnap.exists ? existingSnap.data() : null;
 
     // Structured entity data by block_type. NPC blocks pull from the
     // campaign's npcs subcollection; other kinds land with empty
-    // entityData at M1 (arc/quest/faction/location backfill lands as
-    // those catalogs mature).
+    // entityData at M1.
     let entityData: Record<string, unknown> = {};
     let entityId: string | null = null;
     if (input.block_type === "npc") {
@@ -111,10 +109,8 @@ export const updateContextBlockTool = registerTool({
       }
     }
 
-    // Invoke the generator. modelContext defaults to Anthropic fallback
-    // — Chronicler passes its own via the wrapper when this tool is
-    // called through its standard flow, but direct invocation (e.g.
-    // from a manual admin script) gets a sane default.
+    // Invoke the generator OUTSIDE the transaction — LLM latency would
+    // pin the transaction open and starve other writers.
     const generated = await generateContextBlock(
       {
         blockType: input.block_type,
@@ -136,36 +132,44 @@ export const updateContextBlockTool = registerTool({
       { modelContext: anthropicFallbackConfig() },
     );
 
-    if (existingDoc && existingData) {
-      const nextVersion = (existingData.version as number) + 1;
-      await existingDoc.ref.set(
-        {
-          content: generated.content,
-          continuityChecklist: generated.continuity_checklist,
-          version: nextVersion,
-          lastUpdatedTurn: input.turn_number,
-          updatedAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
-      return { id: existingDoc.id, version: nextVersion, created: false };
-    }
-
-    const newRef = await blocksCol.add({
-      campaignId: ctx.campaignId,
-      blockType: input.block_type,
-      entityId,
-      entityName: input.entity_name,
-      content: generated.content,
-      continuityChecklist: generated.continuity_checklist,
-      status: "active",
-      version: 1,
-      firstTurn: input.turn_number,
-      lastUpdatedTurn: input.turn_number,
-      embedding: null,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
+    // Atomic version bump: re-read inside the transaction to catch any
+    // concurrent write that landed while the LLM was running.
+    const result = await ctx.firestore.runTransaction(async (tx) => {
+      const txSnap = await tx.get(blockRef);
+      if (txSnap.exists) {
+        const data = txSnap.data() ?? {};
+        const nextVersion = (data.version as number) + 1;
+        tx.set(
+          blockRef,
+          {
+            content: generated.content,
+            continuityChecklist: generated.continuity_checklist,
+            version: nextVersion,
+            lastUpdatedTurn: input.turn_number,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+        return { version: nextVersion, created: false };
+      }
+      tx.set(blockRef, {
+        campaignId: ctx.campaignId,
+        blockType: input.block_type,
+        entityId,
+        entityName: input.entity_name,
+        content: generated.content,
+        continuityChecklist: generated.continuity_checklist,
+        status: "active",
+        version: 1,
+        firstTurn: input.turn_number,
+        lastUpdatedTurn: input.turn_number,
+        embedding: null,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return { version: 1, created: true };
     });
-    return { id: newRef.id, version: 1, created: true };
+
+    return { id: docId, version: result.version, created: result.created };
   },
 });
