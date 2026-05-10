@@ -162,12 +162,13 @@ describe("tool registry — core infrastructure", () => {
           "list_known_npcs",
           "recall_scene",
           "search_memory",
-          // SessionZeroConductor tools (M2 Wave A)
+          // SessionZeroConductor tools (M2 Wave A + Wave B)
           "ask_clarifying_question",
           "commit_field",
           "finalize_session_zero",
           "propose_canonicality_mode",
           "propose_character_option",
+          "search_profile_library",
         ].sort(),
       );
     });
@@ -222,6 +223,7 @@ describe("tool registry — core infrastructure", () => {
           "finalize_session_zero",
           "propose_canonicality_mode",
           "propose_character_option",
+          "search_profile_library",
         ].sort(),
       );
     });

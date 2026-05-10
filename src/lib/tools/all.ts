@@ -54,5 +54,6 @@ import "./sz/commit-field";
 import "./sz/finalize-session-zero";
 import "./sz/propose-canonicality-mode";
 import "./sz/propose-character-option";
+import "./sz/search-profile-library";
 import "./voice/get-voice-exemplars-by-beat-type";
 import "./voice/get-voice-patterns";
