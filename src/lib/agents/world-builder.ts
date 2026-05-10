@@ -204,10 +204,40 @@ export const InternalConsistencyFlag = z.object({
 });
 export type InternalConsistencyFlag = z.infer<typeof InternalConsistencyFlag>;
 
+/**
+ * Canonicality-mode breach (M2.5 sub 2). Distinct from internal_consistency
+ * because the contradiction is with the SOURCE canon, not the player's
+ * own prior assertions. Per ROADMAP §10.4, full_cast and
+ * replaced_protagonist modes flag hard breaches loud:
+ *   - full_cast: blood-relation claims to named canon characters,
+ *     contradiction of canonical character deaths/origins
+ *   - replaced_protagonist: contradiction of major canon arcs
+ *
+ * v4 doesn't have REJECT (the prompt locks this). The flag rides on
+ * an ACCEPT decision so the player's authorship isn't gatekept; the
+ * sidebar surfaces "this contradicts canon" so the author chooses
+ * deliberately whether to soften, retcon, or commit.
+ */
+export const CanonicalityBreachFlag = z.object({
+  kind: z.literal("canonicality_breach"),
+  /** The current-turn assertion — '"I\'m Naruto\'s brother."' */
+  evidence: z.string().min(1),
+  /** Which mode the breach happens under. Threads from input. */
+  violated_mode: z.enum(["full_cast", "replaced_protagonist"]),
+  /** What canonical fact is being contradicted —
+   *  "Naruto's surviving family is canonically Boruto + Himawari + Hinata; no other siblings." */
+  contradicts_canon: z.string().min(1),
+  /** How the author could soften — "frame as adopted / unrecognized half-sibling
+   *  → coherent with canon's gaps without flat contradicting them." */
+  suggestion: z.string().min(1),
+});
+export type CanonicalityBreachFlag = z.infer<typeof CanonicalityBreachFlag>;
+
 export const WorldBuilderFlag = z.discriminatedUnion("kind", [
   VoiceFitFlag,
   StakesImplicationFlag,
   InternalConsistencyFlag,
+  CanonicalityBreachFlag,
 ]);
 export type WorldBuilderFlag = z.infer<typeof WorldBuilderFlag>;
 

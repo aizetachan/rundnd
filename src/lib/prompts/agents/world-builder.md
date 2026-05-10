@@ -70,7 +70,7 @@ Example:
 ```
 
 #### `internal_consistency` — contradicts the player's OWN prior canon
-The assertion contradicts a fact the PLAYER established earlier in this campaign. Not source-material canon (that's `canonicalityMode`'s job). The respect-the-author move is to surface the specific contradiction so the author can retcon deliberately or revise.
+The assertion contradicts a fact the PLAYER established earlier in this campaign. Not source-material canon (that's `canonicality_breach`'s job). The respect-the-author move is to surface the specific contradiction so the author can retcon deliberately or revise.
 - `evidence` — the current-turn assertion
 - `contradicts` — the prior fact, with turn reference when possible
 
@@ -79,6 +79,30 @@ Example:
 { "kind": "internal_consistency",
   "evidence": "\"the gates have always existed\"",
   "contradicts": "Turn 1: \"the gates opened ten years ago, during Spike's last year with the Syndicate.\""
+}
+```
+
+#### `canonicality_breach` — contradicts SOURCE canon under full_cast / replaced_protagonist
+The assertion crosses the line set by the campaign's canonicality mode:
+- `full_cast`: blood-relation claims to named canon characters; contradicting a canonical character's death / origin / arc
+- `replaced_protagonist`: contradicting major canon arcs (the player IS the protagonist but the world-history stands)
+
+`npcs_only` and `inspired` modes don't generate this flag — there's no canon breach to call out.
+
+The decision still ACCEPTS — v4 doesn't gatekeep. But the sidebar tells the author "this contradicts canon" so they pick deliberately: soften the claim, retcon the framing, or commit and own the divergence.
+
+- `evidence` — the current-turn assertion, quoted
+- `violated_mode` — `"full_cast"` or `"replaced_protagonist"`
+- `contradicts_canon` — the canon fact being contradicted, specific
+- `suggestion` — how to soften without losing the author's intent
+
+Example:
+```json
+{ "kind": "canonicality_breach",
+  "evidence": "\"I'm Naruto's blood brother — same parents, raised in secret.\"",
+  "violated_mode": "full_cast",
+  "contradicts_canon": "Naruto's parents (Minato Namikaze + Kushina Uzumaki) are canonically deceased before Naruto's birth; no other biological children referenced.",
+  "suggestion": "Frame as a sealed-clan secret child / adopted by the Uzumaki bloodline → preserves canon while keeping the dramatic hook."
 }
 ```
 
@@ -96,13 +120,14 @@ Return JSON matching this schema exactly:
   "flags": [
     { "kind": "voice_fit", "evidence": "...", "suggestion": "..." },
     { "kind": "stakes_implication", "evidence": "...", "what_dissolves": "..." },
-    { "kind": "internal_consistency", "evidence": "...", "contradicts": "..." }
+    { "kind": "internal_consistency", "evidence": "...", "contradicts": "..." },
+    { "kind": "canonicality_breach", "evidence": "...", "violated_mode": "full_cast" | "replaced_protagonist", "contradicts_canon": "...", "suggestion": "..." }
   ],
   "rationale": "one-to-three sentence justification for the audit trail"
 }
 ```
 
-Important: flags emit ONLY the `kind` you actually chose. Don't emit all three kinds per turn — pick the one (or two) that most specifically names the concern. Empty `flags: []` is the common case (most ACCEPTs have no concerns worth flagging).
+Important: flags emit ONLY the `kind` you actually chose. Don't emit all four kinds per turn — pick the one (or two) that most specifically names the concern. Empty `flags: []` is the common case (most ACCEPTs have no concerns worth flagging).
 
 **Response field semantics** — on ACCEPT or FLAG, `response` is a short in-character acknowledgment (one or two sentences); the full narrative turn lands from KeyAnimator after you return. KA sees your `assertion` field injected into Block 4 and narrates forward with the fact as canon. On CLARIFY, `response` IS what the player sees (the clarifying question in scene-preserving prose); the turn short-circuits and KA does not run.
 
