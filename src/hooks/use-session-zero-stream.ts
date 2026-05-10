@@ -15,8 +15,11 @@ import { useCallback, useRef, useState } from "react";
  *   - `error`         — terminal error, if any
  */
 
+type HandoffStatus = "compiling" | "compiled" | "compiled_with_warnings" | "failed";
+
 type SzEvent =
   | { type: "text"; delta: string }
+  | { type: "handoff"; status: HandoffStatus; message?: string; packageId?: string }
   | {
       type: "done";
       text: string;
@@ -24,8 +27,10 @@ type SzEvent =
       totalMs: number;
       costUsd: number | null;
       toolCallCount: number;
-      /** SZ doc phase after this turn — `ready_for_handoff` triggers a route change in the UI. */
+      /** SZ doc phase after this turn — `complete` (handoff ran) or `ready_for_handoff` (handoff failed). */
       phase: string;
+      /** Set when handoff succeeded; UI navigates here. Null otherwise. */
+      redirectTo: string | null;
     }
   | { type: "error"; message: string };
 
@@ -34,6 +39,8 @@ export interface UseSessionZeroStreamReturn {
   cancel: () => void;
   streaming: boolean;
   liveText: string;
+  /** Latest handoff status emitted on this stream. Null until/unless one fires. */
+  handoff: { status: HandoffStatus; message?: string; packageId?: string } | null;
   lastTurn: Extract<SzEvent, { type: "done" }> | null;
   error: string | null;
 }
@@ -42,6 +49,7 @@ export function useSessionZeroStream(campaignId: string): UseSessionZeroStreamRe
   const [streaming, setStreaming] = useState(false);
   const [liveText, setLiveText] = useState("");
   const [lastTurn, setLastTurn] = useState<Extract<SzEvent, { type: "done" }> | null>(null);
+  const [handoff, setHandoff] = useState<UseSessionZeroStreamReturn["handoff"]>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -56,6 +64,7 @@ export function useSessionZeroStream(campaignId: string): UseSessionZeroStreamRe
       if (streaming) return;
       setError(null);
       setLiveText("");
+      setHandoff(null);
       setStreaming(true);
 
       const controller = new AbortController();
@@ -105,6 +114,12 @@ export function useSessionZeroStream(campaignId: string): UseSessionZeroStreamRe
             const ev = { type: eventName, ...(parsed as object) } as SzEvent;
             if (ev.type === "text") {
               setLiveText((t) => t + ev.delta);
+            } else if (ev.type === "handoff") {
+              setHandoff({
+                status: ev.status,
+                message: ev.message,
+                packageId: ev.packageId,
+              });
             } else if (ev.type === "done") {
               setLastTurn(ev);
             } else if (ev.type === "error") {
@@ -124,5 +139,5 @@ export function useSessionZeroStream(campaignId: string): UseSessionZeroStreamRe
     [campaignId, streaming],
   );
 
-  return { send, cancel, streaming, liveText, lastTurn, error };
+  return { send, cancel, streaming, liveText, handoff, lastTurn, error };
 }

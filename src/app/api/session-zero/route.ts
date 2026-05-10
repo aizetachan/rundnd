@@ -4,6 +4,7 @@ import { checkBudget, incrementCostLedger } from "@/lib/budget";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
 import { COL } from "@/lib/firestore";
 import { getLangfuse } from "@/lib/observability/langfuse";
+import { runHandoff } from "@/lib/session-zero/run-handoff";
 import { appendConversationTurn, loadSessionZero } from "@/lib/session-zero/state";
 import type { AidmSpanHandle, AidmToolContext } from "@/lib/tools";
 import { resolveModelContext } from "@/lib/workflow/turn";
@@ -242,23 +243,64 @@ export async function POST(req: Request) {
 
       if (runError) {
         controller.enqueue(encodeSseEvent("error", { message: runError.message }));
-      } else {
-        // Re-read phase: a `finalize_session_zero` tool call during
-        // the run flips it to `ready_for_handoff`. The UI uses this
-        // to redirect to /campaigns/{id}/play after sub 4 lands.
-        const post = await loadSessionZero(firestore, body.campaignId).catch(() => null);
-        controller.enqueue(
-          encodeSseEvent("done", {
-            text: aggregatedText,
-            ttftMs,
-            totalMs,
-            costUsd,
-            toolCallCount,
-            phase: post?.phase ?? szPhase,
-          }),
-        );
+        controller.close();
+        return;
       }
 
+      // Re-read phase: `finalize_session_zero` flips it to
+      // `ready_for_handoff`. If we're there, run HandoffCompiler now
+      // (synchronously inside this request — the player is waiting on
+      // the redirect anyway, and a deferred `after()` would race the
+      // browser's navigation).
+      const post = await loadSessionZero(firestore, body.campaignId).catch(() => null);
+      let phase = post?.phase ?? szPhase;
+      let redirectTo: string | null = null;
+
+      if (phase === "ready_for_handoff") {
+        controller.enqueue(encodeSseEvent("handoff", { status: "compiling" }));
+        try {
+          const handoffModelContext = resolveModelContext(cd.settings);
+          const result = await runHandoff(
+            {
+              campaignId: body.campaignId,
+              userId: user.id,
+              modelContext: handoffModelContext,
+            },
+            { firestore, trace },
+          );
+          phase = "complete";
+          redirectTo = result.redirectTo;
+          controller.enqueue(
+            encodeSseEvent("handoff", {
+              status: result.fellBack ? "compiled_with_warnings" : "compiled",
+              packageId: result.packageId,
+            }),
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("[session-zero] handoff failed", {
+            userId: user.id,
+            campaignId: body.campaignId,
+            error: msg,
+          });
+          // Don't block the player on a handoff failure — emit the
+          // done event with phase=ready_for_handoff so the UI shows
+          // the warning banner. Sub 5's resume flow will offer redo.
+          controller.enqueue(encodeSseEvent("handoff", { status: "failed", message: msg }));
+        }
+      }
+
+      controller.enqueue(
+        encodeSseEvent("done", {
+          text: aggregatedText,
+          ttftMs,
+          totalMs,
+          costUsd,
+          toolCallCount,
+          phase,
+          redirectTo,
+        }),
+      );
       controller.close();
     },
     cancel() {

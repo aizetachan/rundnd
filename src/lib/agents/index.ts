@@ -122,6 +122,12 @@ export {
   type SessionZeroConductorYieldFinal,
   type SessionZeroConductorYieldText,
 } from "./session-zero-conductor";
+export {
+  type HandoffCompilerInput,
+  type HandoffCompilerResult,
+  type HandoffSynthesis,
+  runHandoffCompiler,
+} from "./handoff-compiler";
 
 // --- Shared types ---
 export {

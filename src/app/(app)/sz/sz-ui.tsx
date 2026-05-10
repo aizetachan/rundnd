@@ -27,7 +27,8 @@ interface Props {
  */
 export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: Props) {
   const router = useRouter();
-  const { send, cancel, streaming, liveText, lastTurn, error } = useSessionZeroStream(campaignId);
+  const { send, cancel, streaming, liveText, handoff, lastTurn, error } =
+    useSessionZeroStream(campaignId);
   const [input, setInput] = useState("");
   const [committed, setCommitted] = useState<PriorMessage[]>(priorHistory);
   const [budgetRefreshKey, setBudgetRefreshKey] = useState(0);
@@ -38,7 +39,8 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
 
   // Each `done` event commits one user→conductor pair into the local
   // feed. The hook resets `lastTurn` only on a new `send`, so this
-  // useEffect fires once per turn — no extra dedupe needed.
+  // useEffect fires once per turn — no extra dedupe needed. If the
+  // turn carried a handoff redirect, navigate to gameplay.
   useEffect(() => {
     if (!lastTurn) return;
     setCommitted((prev) => [
@@ -49,11 +51,8 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
     pendingMessageRef.current = "";
     setBudgetRefreshKey((k) => k + 1);
 
-    if (lastTurn.phase === "ready_for_handoff" || lastTurn.phase === "complete") {
-      // Sub 4 will own the actual handoff. For sub 3 we just notify
-      // the player and stop the input — they can refresh into /play
-      // once HandoffCompiler ships.
-      router.refresh();
+    if (lastTurn.redirectTo) {
+      router.replace(lastTurn.redirectTo);
     }
   }, [lastTurn, router]);
 
@@ -91,7 +90,17 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
     }
   };
 
-  const finalized = lastTurn?.phase === "ready_for_handoff" || lastTurn?.phase === "complete";
+  // "Compiling" while the handoff is in flight; "Done" once the route
+  // emits redirectTo. The `finalized` check disables input as soon as
+  // we know the turn is heading to handoff (player shouldn't keep
+  // typing while we're stitching the opening scene).
+  const compiling = handoff?.status === "compiling";
+  const handoffFailed = handoff?.status === "failed";
+  const finalized =
+    compiling ||
+    handoffFailed ||
+    lastTurn?.phase === "ready_for_handoff" ||
+    lastTurn?.phase === "complete";
 
   // Render-friendly message list: filter out tool-call sidecars whose
   // text is empty (those are bookkeeping, not conversation). The
@@ -156,10 +165,34 @@ export default function SzUI({ campaignId, priorHistory, hardRequirementsMet }: 
             </div>
           ) : null}
 
-          {finalized ? (
+          {compiling ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+              Compiling your opening scene…
+            </div>
+          ) : null}
+
+          {handoffFailed ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive text-sm">
+              Handoff failed: {handoff?.message ?? "(no detail)"} — please try sending another
+              message. (sub 5 will surface a retry control.)
+            </div>
+          ) : null}
+
+          {handoff?.status === "compiled_with_warnings" ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+              Compiled with warnings. Loading your opening scene…
+            </div>
+          ) : null}
+
+          {handoff?.status === "compiled" ? (
             <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm">
-              Session Zero is ready for handoff. The first scene will open here once HandoffCompiler
-              ships (sub 4).
+              Session Zero complete. Loading your opening scene…
+            </div>
+          ) : null}
+
+          {finalized && !compiling && !handoff ? (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm">
+              Session Zero finalized.
             </div>
           ) : null}
         </div>
