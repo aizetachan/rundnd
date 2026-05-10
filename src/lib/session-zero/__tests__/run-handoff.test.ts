@@ -19,6 +19,17 @@ vi.mock("@/lib/agents/handoff-compiler", () => ({
   runHandoffCompiler: vi.fn(),
 }));
 
+vi.mock("@/lib/agents/active-ip-synthesizer", () => ({
+  runActiveIPSynthesizer: vi.fn(),
+  projectSynthesizedProfile: vi.fn(
+    (_synthesis: unknown, sourceProfiles: unknown[], hybridId: string) => ({
+      ...(sourceProfiles[0] as Record<string, unknown>),
+      id: hybridId,
+      title: "Bebop × Berserk",
+    }),
+  ),
+}));
+
 interface CampaignRow {
   id: string;
   data: Record<string, unknown>;
@@ -284,7 +295,28 @@ describe("runHandoff orchestrator", () => {
     ).rejects.toThrow(/in_progress/);
   });
 
-  it("throws when profile_refs has more than one entry (hybrid → Wave B)", async () => {
+  it("hybrid profile_refs → invokes the active-IP synthesizer (Wave B sub 8)", async () => {
+    const { runActiveIPSynthesizer } = await import("@/lib/agents/active-ip-synthesizer");
+    vi.mocked(runActiveIPSynthesizer).mockResolvedValue({
+      synthesis: {
+        active_ip_prose: "blended world prose",
+        synthesized_title: "Bebop × Berserk",
+        power_system_blend: "hybrid combat rules",
+        blended_dna: { pacing: 5 } as never,
+        blended_composition: {} as never,
+        director_personality: "blended director voice that owns the synthesis decisively.",
+        hybrid_synthesis_notes: "world-source from Bebop; supernatural from Berserk.",
+      },
+      fellBack: false,
+    });
+    const { runHandoffCompiler: runHandoffCompilerMock } = await import(
+      "@/lib/agents/handoff-compiler"
+    );
+    vi.mocked(runHandoffCompilerMock).mockResolvedValue({
+      package: STUB_PACKAGE,
+      fellBack: false,
+    });
+
     const { runHandoff } = await import("../run-handoff");
     const fake = makeFakeFirestore({
       campaign: {
@@ -293,12 +325,13 @@ describe("runHandoff orchestrator", () => {
         szDoc: { ...READY_SZ_DOC, profile_refs: ["cowboy-bebop", "berserk"] },
       },
     });
-    await expect(
-      runHandoff(
-        { campaignId: "c-1", userId: "u-1", modelContext: anthropicFallbackConfig() },
-        { firestore: fake.firestore as never },
-      ),
-    ).rejects.toThrow(/hybrid/);
+    await runHandoff(
+      { campaignId: "c-1", userId: "u-1", modelContext: anthropicFallbackConfig() },
+      { firestore: fake.firestore as never },
+    );
+    expect(runActiveIPSynthesizer).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(runActiveIPSynthesizer).mock.calls[0]?.[0];
+    expect(call?.sourceProfiles).toHaveLength(2);
   });
 
   it("throws when the profile doc doesn't exist", async () => {

@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  projectSynthesizedProfile,
+  runActiveIPSynthesizer,
+} from "@/lib/agents/active-ip-synthesizer";
 import { runHandoffCompiler } from "@/lib/agents/handoff-compiler";
 import { CAMPAIGN_SUB, COL, SESSION_ZERO_DOC_ID } from "@/lib/firestore";
 import type { CampaignProviderConfig } from "@/lib/providers";
@@ -154,24 +158,47 @@ async function compileAndPersist(args: {
 }): Promise<RunHandoffResult> {
   const { firestore, szRef, szState, input, deps } = args;
 
-  // 3. Load the profile. Wave A first ship is single-profile only.
+  // 3. Load the profile(s). Single = pass straight to HandoffCompiler;
+  //    multiple = run the active-IP synthesizer first, then pass the
+  //    synthesized profile to HandoffCompiler. The HandoffCompiler
+  //    itself remains single-profile-only — synthesis happens before.
   if (szState.profile_refs.length === 0) {
     throw new Error("runHandoff: SZ has no profile_refs — finalize gate should have caught this");
   }
-  if (szState.profile_refs.length > 1) {
-    throw new Error(
-      `runHandoff: hybrid profiles (got ${szState.profile_refs.length} refs) defer to Wave B`,
+  const sourceProfiles: Profile[] = [];
+  for (const ref of szState.profile_refs) {
+    const snap = await firestore.collection(COL.profiles).doc(ref).get();
+    if (!snap.exists) {
+      throw new Error(`runHandoff: profile not found at profiles/${ref}`);
+    }
+    sourceProfiles.push(Profile.parse(snap.data()?.content));
+  }
+
+  let profile: Profile;
+  let hybridSynthesisNotes: string | null = null;
+  if (sourceProfiles.length === 1) {
+    profile = sourceProfiles[0] as Profile;
+  } else {
+    // Multi-profile hybrid. The conductor's last "starting_situation"
+    // captures the player's blend intent; fallback to a generic
+    // synthesizer prompt when unset.
+    const intent =
+      szState.starting_situation ??
+      `${sourceProfiles.map((p) => p.title).join(" + ")} as a coherent campaign`;
+    const synthResult = await runActiveIPSynthesizer(
+      {
+        sourceProfiles,
+        intent,
+        modelContext: input.modelContext,
+      },
+      { trace: deps.trace },
     );
+    const hybridId = `hybrid_${createHash("sha1").update(szState.profile_refs.join("|")).digest("hex").slice(0, 12)}`;
+    profile = projectSynthesizedProfile(synthResult.synthesis, sourceProfiles, hybridId);
+    hybridSynthesisNotes = synthResult.fellBack
+      ? "synthesis fell back to placeholder; arc planning leans on first source"
+      : synthResult.synthesis.hybrid_synthesis_notes;
   }
-  const profileRef = szState.profile_refs[0];
-  if (!profileRef) {
-    throw new Error("runHandoff: profile_refs[0] resolved to undefined");
-  }
-  const profileSnap = await firestore.collection(COL.profiles).doc(profileRef).get();
-  if (!profileSnap.exists) {
-    throw new Error(`runHandoff: profile not found at profiles/${profileRef}`);
-  }
-  const profile = Profile.parse(profileSnap.data()?.content);
 
   // 4. Compile.
   const compiled = await runHandoffCompiler(
@@ -254,6 +281,10 @@ async function compileAndPersist(args: {
       present_npcs: pkg.opening_cast.map((c) => c.name),
     },
     canon_rules: pkg.canon_rules.forbidden_contradictions,
+    // Hybrid synthesis audit trail — Director can re-read this on arc
+    // transitions to remember which source dominates which axis.
+    // Null on single-profile campaigns.
+    hybrid_synthesis_notes: hybridSynthesisNotes,
   };
 
   await firestore.runTransaction(async (tx) => {

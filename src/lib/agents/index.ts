@@ -137,6 +137,15 @@ export {
   runProfileResearcherB,
 } from "./profile-researcher-b";
 
+// --- Active-IP synthesizer for hybrid campaigns (M2 Wave B sub 8) ---
+export {
+  type ActiveIPSynthesis,
+  type ActiveIPSynthesizerInput,
+  type ActiveIPSynthesizerResult,
+  projectSynthesizedProfile,
+  runActiveIPSynthesizer,
+} from "./active-ip-synthesizer";
+
 // --- Shared types ---
 export {
   defaultLogger,
