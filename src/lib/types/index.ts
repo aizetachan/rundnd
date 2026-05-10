@@ -4,5 +4,6 @@ export * from "./composition";
 export * from "./dna";
 export * from "./opening-state-package";
 export * from "./profile";
+export * from "./profile-disambiguation";
 export * from "./session-zero";
 export * from "./turn";
