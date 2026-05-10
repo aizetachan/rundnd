@@ -1,14 +1,15 @@
 /**
  * Seed / re-seed the Bebop campaign for one user.
  *
- * You usually don't need to run this — the sign-in flow
- * (POST /api/auth/session) lazy-seeds on first sign-in, so signing in
- * at prod is enough to land on a playable campaign. This script exists
- * for:
- *   - re-seeding from dev when the fixture changes (updates the profile
- *     doc; leaves existing campaign state alone)
- *   - manually creating a campaign for a user whose lazy-seed didn't
- *     fire (rare — sign-in error mid-flight, etc.)
+ * Since M2 Wave A sub 6 (auto-seed cutover), the sign-in flow no
+ * longer lazy-seeds the Bebop campaign — fresh users land on
+ * /campaigns empty and walk through Session Zero. This script is the
+ * dev-debug entry point for:
+ *   - re-seeding from dev when the profile fixture changes (updates
+ *     the profile doc; leaves existing campaign state alone)
+ *   - bootstrapping a Bebop demo campaign for an account that needs
+ *     a known-good gameplay surface (smoke-testing /campaigns/[id]/play
+ *     without going through the SZ conductor)
  *
  * Usage (with .env.local loaded):
  *   pnpm seed:campaign                            # seeds against first user

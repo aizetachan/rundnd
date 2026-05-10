@@ -13,9 +13,10 @@ export default async function CampaignsPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/sign-in");
 
-  // Backfill users-row + Bebop campaign for accounts that slipped past
-  // the auth-side seed. Idempotent — fresh sign-in seeded users no-op
-  // through here. See src/lib/seed/ensure-seeded.ts for rationale.
+  // Defensive users-row upsert for accounts that slipped past the
+  // auth-side seed (idempotent). Sub 6 removed the Bebop auto-seed
+  // from this path — fresh users land here with no campaigns and use
+  // the CTA below to start their first one via Session Zero.
   try {
     await ensureUserSeeded(user);
   } catch (err) {

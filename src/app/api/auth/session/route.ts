@@ -66,10 +66,12 @@ export async function POST(req: NextRequest) {
     if (ageSec > 5 * 60) {
       return NextResponse.json({ error: "stale_token" }, { status: 401 });
     }
-    // Lazy upsert + Bebop demo seed. Replaces the old Clerk webhook
-    // flow that ran on user.created. Errors are logged but don't block
-    // sign-in — a failed seed is recoverable later via the CLI script,
-    // whereas a blocked sign-in leaves the user stranded.
+    // Lazy users/{uid} upsert so the cost ledger + daily-cap reads
+    // have a row to land on. Replaces the old Clerk webhook flow that
+    // ran on user.created. Sub 6 of M2 Wave A removed the Bebop auto-
+    // seed from this path; new users now walk through Session Zero
+    // via the /campaigns CTA. Errors are logged but don't block
+    // sign-in — a blocked sign-in strands the user.
     try {
       await ensureUserSeeded({ id: decoded.uid, email: decoded.email ?? null });
     } catch (err) {

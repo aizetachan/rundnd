@@ -2,33 +2,29 @@ import type { AppUser } from "@/lib/auth";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
 import { COL } from "@/lib/firestore";
 import { FieldValue } from "firebase-admin/firestore";
-import { seedBebopCampaign } from "./bebop";
 
 /**
- * Lazy upsert of the user doc + Bebop demo campaign. Invoked from
+ * Lazy upsert of the `users/{uid}` doc on sign-in. Invoked from
  * POST /api/auth/session right after the ID token verifies, so the
- * player who just signed up lands on /campaigns with something to
- * play immediately.
+ * cost ledger + daily-cap reads have a row to land on the first
+ * time the player hits the budget gate.
  *
- * Both operations are idempotent:
- *   - users/{uid}: set merge (creates the doc on first call, no-ops on
- *     repeat calls; never overwrites the spending cap if already set).
- *   - seedBebopCampaign: upserts profile by slug, skips campaign
- *     creation if one with BEBOP_CAMPAIGN_NAME already exists.
+ * Bebop auto-seed (M2 Wave A sub 6 cutover): this used to call
+ * `seedBebopCampaign` so a fresh sign-in landed on a playable
+ * campaign immediately. Now new users land on `/campaigns` empty
+ * and walk through Session Zero via the "+ Start a new campaign"
+ * CTA. `seedBebopCampaign` itself stays in the codebase as a
+ * dev-debug entry point invocable through `pnpm seed:campaign`.
  *
- * Cost: ~3 Firestore reads on the warm path (user doc + profile lookup
- * + campaign existence check). Sign-in latency, not turn-time hot path.
+ * Idempotent: a transactional read-then-set on `users/{uid}` so
+ * concurrent first-time POSTs converge without clobbering an already-
+ * set `dailyCostCapUsd` (Firestore merge writes nulls verbatim
+ * rather than skipping them).
  */
 export async function ensureUserSeeded(user: AppUser): Promise<void> {
   if (!user.email) return;
   const db = getFirebaseFirestore();
   const userRef = db.collection(COL.users).doc(user.id);
-  // Transaction so a concurrent first-time POST can't both create-then-
-  // clobber the doc. Plain set merge would race AND would also wipe a
-  // previously-set dailyCostCapUsd back to null on every call (Firestore
-  // merge writes nulls verbatim, it doesn't skip them). The transaction
-  // reads first, then either creates the full default doc or refreshes
-  // only the email — preserving the cap and createdAt invariants.
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(userRef);
     if (!snap.exists) {
@@ -43,5 +39,4 @@ export async function ensureUserSeeded(user: AppUser): Promise<void> {
       tx.set(userRef, { email: user.email }, { merge: true });
     }
   });
-  await seedBebopCampaign(user.id);
 }

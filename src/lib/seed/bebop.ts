@@ -9,9 +9,12 @@ import jsYaml from "js-yaml";
 
 /**
  * Reusable seed — Cowboy Bebop profile + Spike character + a playable
- * campaign. Invoked by `pnpm seed:campaign` (dev CLI) and by the
- * sign-in flow (POST /api/auth/session) so a player who's just signed
- * up lands on /campaigns with something to play immediately.
+ * campaign. Since M2 Wave A sub 6 (auto-seed cutover) the sign-in
+ * flow no longer invokes this — fresh users walk through Session
+ * Zero. The function survives as the dev-debug entry point for
+ * `pnpm seed:campaign` (re-seed when the fixture changes; bootstrap
+ * a known-good /play surface for smoke-testing without going through
+ * the SZ conductor).
  *
  * Idempotent: upserts the profile by slug and creates the campaign
  * only if the user doesn't already have one named BEBOP_CAMPAIGN_NAME.
