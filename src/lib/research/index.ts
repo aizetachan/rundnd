@@ -17,4 +17,5 @@
  * ground-truth YAMLs to drive the §10.6 decision rule.
  */
 
+export * from "./normalize";
 export * from "./types";

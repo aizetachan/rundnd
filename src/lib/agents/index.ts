@@ -129,6 +129,14 @@ export {
   runHandoffCompiler,
 } from "./handoff-compiler";
 
+// --- Profile researcher Path B (M2 Wave B sub 3) ---
+export {
+  type ProfileResearchInput,
+  type ProfileResearchResult,
+  type ProfileResearcherDeps,
+  runProfileResearcherB,
+} from "./profile-researcher-b";
+
 // --- Shared types ---
 export {
   defaultLogger,
