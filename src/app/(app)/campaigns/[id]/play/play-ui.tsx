@@ -12,10 +12,22 @@ interface PriorTurn {
   narrative_text: string;
 }
 
+interface CharacterCard {
+  name: string;
+  concept: string;
+  power_tier: string | null;
+  abilities: Array<{ name: string; description: string; limitations?: string | null }>;
+  hp: number | null;
+  status_effects: string[];
+}
+
 interface Props {
   campaignId: string;
   campaignName: string;
   priorTurns: PriorTurn[];
+  /** Read-only character card. M2.5 polish — in-fiction edits route
+   *  through WorldBuilder per ROADMAP §10.8. */
+  character: CharacterCard | null;
 }
 
 /**
@@ -24,7 +36,7 @@ interface Props {
  * turn on `done`. Router short-circuits (WB clarify/reject, override
  * ack) render in the same bubble — they're just non-streaming turns.
  */
-export default function PlayUI({ campaignId, campaignName, priorTurns }: Props) {
+export default function PlayUI({ campaignId, campaignName, priorTurns, character }: Props) {
   const { send, cancel, streaming, liveText, routedResponse, lastTurn, error } =
     useTurnStream(campaignId);
   const [input, setInput] = useState("");
@@ -113,12 +125,23 @@ export default function PlayUI({ campaignId, campaignName, priorTurns }: Props) 
     }
   };
 
+  // Pre-TTFT indicator — between send() and the first text delta we
+  // have `streaming=true` but `displayedLive=""`. Show "KA composing…"
+  // so the UI doesn't feel frozen during the LLM warm-up.
+  const showComposingIndicator = streaming && !displayedLive;
+
   return (
     <div className="flex h-[calc(100vh-8rem)] flex-col gap-4">
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">{campaignName}</h1>
         <div className="flex items-center gap-4">
           <BudgetIndicator refreshKey={budgetRefreshKey} />
+          <Link
+            href={`/campaigns/${campaignId}/memory`}
+            className="text-muted-foreground text-sm hover:text-foreground"
+          >
+            memory
+          </Link>
           <Link
             href={`/campaigns/${campaignId}/settings`}
             className="text-muted-foreground text-sm hover:text-foreground"
@@ -131,52 +154,113 @@ export default function PlayUI({ campaignId, campaignName, priorTurns }: Props) 
         </div>
       </header>
 
-      <div ref={feedRef} className="flex-1 overflow-y-auto rounded-lg border bg-background/40 p-4">
-        <div className="mx-auto flex max-w-3xl flex-col gap-6">
-          {committed.length === 0 && !streaming && !displayedLive ? (
-            <p className="text-muted-foreground italic">
-              {
-                "Your ship is drifting through Ganymede traffic. The bounty board is blinking. Type what you want to do."
-              }
-            </p>
-          ) : null}
-
-          {committed.map((t) => (
-            <div key={t.turn_number} className="flex flex-col gap-2">
-              {t.player_message ? (
-                <p className="whitespace-pre-wrap text-muted-foreground text-sm">
-                  <span className="mr-2 font-mono text-xs opacity-60">you</span>
-                  {t.player_message}
-                </p>
-              ) : null}
-              <p className="whitespace-pre-wrap leading-relaxed">{t.narrative_text}</p>
-            </div>
-          ))}
-
-          {streaming && (
-            <div className="flex flex-col gap-2">
-              {pendingMessageRef.current ? (
-                <p className="whitespace-pre-wrap text-muted-foreground text-sm">
-                  <span className="mr-2 font-mono text-xs opacity-60">you</span>
-                  {pendingMessageRef.current}
-                </p>
-              ) : null}
-              <p className="whitespace-pre-wrap leading-relaxed">
-                {displayedLive}
-                <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-current opacity-60" />
+      <div className="flex flex-1 gap-4 overflow-hidden">
+        {/* Character sheet sidebar — read-only. */}
+        {character ? (
+          <aside className="hidden w-64 shrink-0 overflow-y-auto rounded-lg border bg-background/40 p-4 md:block">
+            <h2 className="mb-1 font-semibold text-sm">{character.name}</h2>
+            {character.power_tier ? (
+              <p className="mb-2 text-muted-foreground text-xs uppercase tracking-wide">
+                {character.power_tier}
               </p>
-            </div>
-          )}
+            ) : null}
+            <p className="mb-3 text-muted-foreground text-xs italic leading-relaxed">
+              {character.concept}
+            </p>
 
-          {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive text-sm">
-              {error}
-            </div>
-          ) : null}
+            {character.hp !== null || character.status_effects.length > 0 ? (
+              <div className="mb-3 rounded-md border bg-background/40 p-2 text-xs">
+                {character.hp !== null ? (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">HP</span>
+                    <span className="tabular-nums font-medium">{character.hp}</span>
+                  </div>
+                ) : null}
+                {character.status_effects.length > 0 ? (
+                  <div className="mt-1">
+                    <span className="text-muted-foreground">Status: </span>
+                    <span>{character.status_effects.join(", ")}</span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
-          {lastTurn?.flags && lastTurn.flags.length > 0 ? (
-            <FlagSidebar flags={lastTurn.flags} turnKey={lastTurn.turnNumber} />
-          ) : null}
+            {character.abilities.length > 0 ? (
+              <div>
+                <h3 className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+                  Abilities
+                </h3>
+                <ul className="flex flex-col gap-2 text-xs">
+                  {character.abilities.map((a) => (
+                    <li key={a.name}>
+                      <p className="font-medium">{a.name}</p>
+                      <p className="text-muted-foreground leading-snug">{a.description}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </aside>
+        ) : null}
+
+        <div ref={feedRef} className="flex-1 overflow-y-auto rounded-lg border bg-background/40 p-4">
+          <div className="mx-auto flex max-w-3xl flex-col gap-6">
+            {committed.length === 0 && !streaming && !displayedLive ? (
+              <p className="text-muted-foreground italic">
+                {
+                  "Your ship is drifting through Ganymede traffic. The bounty board is blinking. Type what you want to do."
+                }
+              </p>
+            ) : null}
+
+            {committed.map((t) => (
+              <div key={t.turn_number} className="flex flex-col gap-2">
+                {t.player_message ? (
+                  <p className="whitespace-pre-wrap text-muted-foreground text-sm">
+                    <span className="mr-2 font-mono text-xs opacity-60">you</span>
+                    {t.player_message}
+                  </p>
+                ) : null}
+                <p className="whitespace-pre-wrap leading-relaxed">{t.narrative_text}</p>
+              </div>
+            ))}
+
+            {streaming && (
+              <div className="flex flex-col gap-2">
+                {pendingMessageRef.current ? (
+                  <p className="whitespace-pre-wrap text-muted-foreground text-sm">
+                    <span className="mr-2 font-mono text-xs opacity-60">you</span>
+                    {pendingMessageRef.current}
+                  </p>
+                ) : null}
+                {showComposingIndicator ? (
+                  <p className="flex items-center gap-2 text-muted-foreground text-sm italic">
+                    <span className="inline-flex gap-1">
+                      <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.3s]" />
+                      <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.15s]" />
+                      <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-current" />
+                    </span>
+                    KA is composing…
+                  </p>
+                ) : (
+                  <p className="whitespace-pre-wrap leading-relaxed">
+                    {displayedLive}
+                    <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-current opacity-60" />
+                  </p>
+                )}
+              </div>
+            )}
+
+            {error ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive text-sm">
+                {error}
+              </div>
+            ) : null}
+
+            {lastTurn?.flags && lastTurn.flags.length > 0 ? (
+              <FlagSidebar flags={lastTurn.flags} turnKey={lastTurn.turnNumber} />
+            ) : null}
+          </div>
         </div>
       </div>
 
