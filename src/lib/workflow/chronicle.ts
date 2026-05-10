@@ -1,4 +1,5 @@
 import { type ArcTrigger, type ChroniclerDeps, runChronicler } from "@/lib/agents/chronicler";
+import { indexTurn } from "@/lib/algolia/turn-index";
 import { incrementCostLedger } from "@/lib/budget";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
 import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
@@ -288,6 +289,21 @@ export async function chronicleTurn(
       // No cost — just stamp chronicledAt.
       await turnRef.set({ chronicledAt: FieldValue.serverTimestamp() }, { merge: true });
     }
+
+    // Index in Algolia for recall_scene full-text search. Awaited so
+    // it lands before the chronicle-side `after()` callback returns,
+    // but failures are caught inside indexTurn — never blocks the
+    // chronicler's "ok" verdict.
+    await indexTurn({
+      objectID: input.turnId,
+      campaignId: input.campaignId,
+      turnNumber: input.turnNumber,
+      narrativeText: input.narrative,
+      summary: null,
+      playerMessage: input.playerMessage,
+      verdictKind: "continue",
+      createdAtMs: Date.now(),
+    });
 
     logger("info", "chronicleTurn: ok", {
       ...logContext,

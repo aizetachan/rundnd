@@ -1,3 +1,5 @@
+import { searchTurns } from "@/lib/algolia/turn-index";
+import { isAlgoliaConfigured } from "@/lib/algolia/client";
 import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import type { Query } from "firebase-admin/firestore";
 import { z } from "zod";
@@ -10,13 +12,13 @@ import { registerTool } from "../registry";
  * "the fight with Vicious" — and then pulls the full prose via
  * `get_turn_narrative`.
  *
- * **DEGRADED implementation (M0.5 Fase 3 sub 5).** Postgres tsvector
- * full-text search has no Firestore equivalent. As a temporary fallback
- * until Fase 4 wires Algolia (Firebase official extension) we fetch the
- * last K=50 turns within the optional turn range and do a case-insensitive
- * substring filter on `narrativeText` in the client. Score is binary
- * (1.0 on match, 0.0 otherwise) so KA still gets ordered hits but
- * relevance ranking is post-Algolia.
+ * Two paths:
+ *   - **Algolia** (primary): real full-text search via the Algolia
+ *     client. Stemming, ranking, snippet generation. Replaces the
+ *     Postgres tsvector path that retired with the Firestore migration.
+ *   - **Substring degraded** (fallback): pull last 50 turns + filter
+ *     in JS. Used when Algolia keys aren't configured (local dev,
+ *     partial deploys). Same shape of output so callers don't notice.
  */
 const SCAN_WINDOW = 50;
 
@@ -41,9 +43,7 @@ const OutputSchema = z.object({
 
 /**
  * Build a ~200-char excerpt around the first match of `keyword` in
- * `text`, lowercased for the locate step. Mirrors the look-and-feel of
- * Postgres `ts_headline(... 'MaxWords=35, MinWords=10')` — a window of
- * roughly that length around the matched term, ellipsized when truncated.
+ * `text`. Used by the degraded path; Algolia returns its own snippet.
  */
 function buildExcerpt(text: string, keyword: string): string {
   const lcText = text.toLowerCase();
@@ -68,11 +68,26 @@ export const recallSceneTool = registerTool({
   execute: async (input, ctx) => {
     if (!ctx.firestore) throw new Error("recall_scene: ctx.firestore not provided");
 
-    // Pull the most-recent K turns; we'll filter+rank in client. Firestore
-    // can't combine a `where(turnNumber, range)` with `orderBy(turnNumber, desc)`
-    // unless the inequality field matches the order field — both are
-    // turnNumber here, so the query plan is fine and a single composite
-    // index covers it.
+    // Algolia path — real full-text search.
+    if (isAlgoliaConfigured()) {
+      const hits = await searchTurns(
+        ctx.campaignId,
+        input.keyword,
+        input.limit,
+        input.turn_range
+          ? { start: input.turn_range.min, end: input.turn_range.max }
+          : undefined,
+      );
+      return {
+        hits: hits.map((h) => ({
+          turn: h.turnNumber,
+          score: h.score,
+          excerpt: h.excerpt,
+        })),
+      };
+    }
+
+    // Degraded fallback — substring match in JS over the last K turns.
     let q: Query = ctx.firestore
       .collection(COL.campaigns)
       .doc(ctx.campaignId)

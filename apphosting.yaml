@@ -80,3 +80,23 @@ env:
     secret: ANTHROPIC_API_KEY
     availability:
       - RUNTIME
+
+  # --- Algolia (full-text search for recall_scene) ---
+  - variable: ALGOLIA_APP_ID
+    secret: ALGOLIA_APP_ID
+    availability:
+      - RUNTIME
+  - variable: ALGOLIA_ADMIN_KEY
+    secret: ALGOLIA_ADMIN_KEY
+    availability:
+      - RUNTIME
+  - variable: NEXT_PUBLIC_ALGOLIA_APP_ID
+    secret: NEXT_PUBLIC_ALGOLIA_APP_ID
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+    secret: NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+    availability:
+      - BUILD
+      - RUNTIME
