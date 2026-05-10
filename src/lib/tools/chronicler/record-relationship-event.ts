@@ -16,7 +16,7 @@ import { assertNpcBelongsToCampaign } from "./_npc-guard";
  * types; M4+ may tighten to a closed enum once the taxonomy stabilizes.
  */
 const InputSchema = z.object({
-  npc_id: z.string().uuid(),
+  npc_id: z.string().min(1),
   milestone_type: z.string().min(1),
   evidence: z.string().min(1),
   turn_number: z.number().int().positive(),

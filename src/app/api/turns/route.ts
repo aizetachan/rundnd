@@ -37,7 +37,7 @@ export const dynamic = "force-dynamic";
  */
 
 const PostBody = z.object({
-  campaignId: z.string().uuid(),
+  campaignId: z.string().min(1),
   message: z.string().min(1).max(4000),
 });
 

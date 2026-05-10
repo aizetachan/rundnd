@@ -21,13 +21,13 @@ import { assertNpcBelongsToCampaign } from "./_npc-guard";
  * calls increment.
  */
 const InputSchema = z.object({
-  npc_id: z.string().uuid(),
+  npc_id: z.string().min(1),
   delta: z.number().int(),
   updated_at_turn: z.number().int().positive(),
 });
 
 const OutputSchema = z.object({
-  npc_id: z.string().uuid(),
+  npc_id: z.string().min(1),
   debt: z.number().int(),
 });
 

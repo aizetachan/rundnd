@@ -18,7 +18,7 @@ import { registerTool } from "../registry";
  * is race-free against concurrent ratify calls.
  */
 const InputSchema = z.object({
-  seed_id: z.string().uuid(),
+  seed_id: z.string().min(1),
 });
 
 const OutputSchema = z.object({

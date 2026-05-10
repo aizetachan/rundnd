@@ -32,7 +32,7 @@ export const ResolvedIP = IPMechanics.extend({
 export type ResolvedIP = z.infer<typeof ResolvedIP>;
 
 export const Campaign = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
 
   /** One entry = strict adaptation. Multiple = hybrid. */
   profile_refs: z.array(z.string().min(1)).min(1),

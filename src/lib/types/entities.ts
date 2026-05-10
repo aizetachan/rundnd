@@ -29,8 +29,8 @@ export const EnsembleArchetype = z.enum([
 export type EnsembleArchetype = z.infer<typeof EnsembleArchetype>;
 
 export const Npc = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   name: z.string().min(1),
   role: z.string().default("acquaintance"),
   personality: z.string().default(""),
@@ -47,8 +47,8 @@ export const Npc = z.object({
 export type Npc = z.infer<typeof Npc>;
 
 export const Location = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   name: z.string().min(1),
   details: z.record(z.string(), z.unknown()).default({}),
   firstSeenTurn: z.number().int().positive(),
@@ -57,8 +57,8 @@ export const Location = z.object({
 export type Location = z.infer<typeof Location>;
 
 export const Faction = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   name: z.string().min(1),
   details: z.record(z.string(), z.unknown()).default({}),
 });
@@ -66,9 +66,9 @@ export type Faction = z.infer<typeof Faction>;
 
 /** Append-only log of relationship milestones between player + NPCs. */
 export const RelationshipEvent = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
-  npcId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
+  npcId: z.string().min(1),
   milestoneType: z.string().min(1),
   evidence: z.string().min(1),
   turnNumber: z.number().int().positive(),
@@ -78,8 +78,8 @@ export type RelationshipEvent = z.infer<typeof RelationshipEvent>;
 /** §9.1 semantic-memory category. Free-form string at M1 — Chronicler
  * can nominate new categories; M4 may tighten to an enum. */
 export const SemanticMemory = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   category: z.string().min(1),
   content: z.string().min(1),
   heat: z.number().int().min(0).max(100),
@@ -100,23 +100,23 @@ export const ForeshadowingStatus = z.enum([
 export type ForeshadowingStatus = z.infer<typeof ForeshadowingStatus>;
 
 export const ForeshadowingSeed = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   name: z.string().min(1),
   description: z.string().min(1),
   status: ForeshadowingStatus.default("PLANTED"),
   payoffWindowMin: z.number().int().min(1),
   payoffWindowMax: z.number().int().min(1),
-  dependsOn: z.array(z.string().uuid()).default([]),
-  conflictsWith: z.array(z.string().uuid()).default([]),
+  dependsOn: z.array(z.string().min(1)).default([]),
+  conflictsWith: z.array(z.string().min(1)).default([]),
   plantedTurn: z.number().int().positive(),
   resolvedTurn: z.number().int().positive().nullable().default(null),
 });
 export type ForeshadowingSeed = z.infer<typeof ForeshadowingSeed>;
 
 export const VoicePattern = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   pattern: z.string().min(1),
   evidence: z.string().default(""),
   turnObserved: z.number().int().positive(),
@@ -127,8 +127,8 @@ export const DirectorNoteScope = z.enum(["turn", "session", "arc", "campaign"]);
 export type DirectorNoteScope = z.infer<typeof DirectorNoteScope>;
 
 export const DirectorNote = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   content: z.string().min(1),
   scope: DirectorNoteScope.default("session"),
   createdAtTurn: z.number().int().positive(),
@@ -136,9 +136,9 @@ export const DirectorNote = z.object({
 export type DirectorNote = z.infer<typeof DirectorNote>;
 
 export const SpotlightDebt = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
-  npcId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
+  npcId: z.string().min(1),
   debt: z.number().int(),
   updatedAtTurn: z.number().int().positive(),
 });
@@ -158,8 +158,8 @@ export const ArcMode = z.enum([
 export type ArcMode = z.infer<typeof ArcMode>;
 
 export const ArcPlanHistoryEntry = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   currentArc: z.string().min(1),
   arcPhase: ArcPhase,
   arcMode: ArcMode,
@@ -185,10 +185,10 @@ export type ContextBlockStatus = z.infer<typeof ContextBlockStatus>;
  * reconstructing campaign state from scattered memory tool calls.
  */
 export const ContextBlock = z.object({
-  id: z.string().uuid(),
-  campaignId: z.string().uuid(),
+  id: z.string().min(1),
+  campaignId: z.string().min(1),
   blockType: ContextBlockType,
-  entityId: z.string().uuid().nullable().default(null),
+  entityId: z.string().min(1).nullable().default(null),
   entityName: z.string().min(1),
   content: z.string().min(1),
   continuityChecklist: z.record(z.string(), z.unknown()).default({}),

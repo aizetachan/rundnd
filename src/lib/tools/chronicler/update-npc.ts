@@ -20,7 +20,7 @@ import { registerTool } from "../registry";
  */
 const InputSchema = z
   .object({
-    id: z.string().uuid().optional(),
+    id: z.string().min(1).optional(),
     name: z.string().min(1).optional(),
     role: z.string().optional(),
     personality: z.string().optional(),

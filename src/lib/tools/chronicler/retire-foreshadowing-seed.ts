@@ -20,7 +20,7 @@ const ACTIVE_STATUSES = new Set(["PLANTED", "GROWING", "CALLBACK"]);
  * race-free against concurrent retires/resolves.
  */
 const InputSchema = z.object({
-  seed_id: z.string().uuid(),
+  seed_id: z.string().min(1),
   reason: z.string().optional().describe("Short justification; not persisted at M1 (logged only)"),
 });
 

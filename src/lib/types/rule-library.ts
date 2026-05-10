@@ -34,7 +34,7 @@ export type RuleLibraryCategory = z.infer<typeof RuleLibraryCategory>;
  * the YAML side (indexer fills / bumps them).
  */
 export const RuleLibraryChunk = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   librarySlug: z.string().min(1),
   category: RuleLibraryCategory,
   axis: z.string().nullable(),

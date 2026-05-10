@@ -48,7 +48,7 @@ const InputSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   version: z.number().int().min(1),
   created: z.boolean(),
 });

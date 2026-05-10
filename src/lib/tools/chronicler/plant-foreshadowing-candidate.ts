@@ -22,8 +22,8 @@ const InputSchema = z.object({
   description: z.string().min(1),
   payoff_window_min: z.number().int().min(1),
   payoff_window_max: z.number().int().min(1),
-  depends_on: z.array(z.string().uuid()).default([]),
-  conflicts_with: z.array(z.string().uuid()).default([]),
+  depends_on: z.array(z.string().min(1)).default([]),
+  conflicts_with: z.array(z.string().min(1)).default([]),
   planted_turn: z.number().int().positive(),
 });
 
