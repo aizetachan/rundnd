@@ -89,18 +89,18 @@ describe("mergeSettingsWithProviderConfig", () => {
     }
   });
 
-  it("throws provider_unavailable when targeting a not-yet-built provider (Google at M1.5)", () => {
-    const googleConfig = {
-      provider: "google" as const,
+  it("throws provider_unavailable when targeting a not-yet-built provider (OpenAI at M5.5)", () => {
+    const openaiConfig = {
+      provider: "openai" as const,
       tier_models: {
         probe: "claude-haiku-4-5-20251001",
-        fast: "gemini-3.1-flash-lite-preview",
-        thinking: "gemini-3.1-pro-preview",
-        creative: "gemini-3.1-pro-preview",
+        fast: "gpt-5.4",
+        thinking: "gpt-5.4",
+        creative: "gpt-5.4",
       },
     };
     try {
-      mergeSettingsWithProviderConfig({}, googleConfig);
+      mergeSettingsWithProviderConfig({}, openaiConfig);
       expect.fail("should have thrown");
     } catch (err) {
       expect(err).toBeInstanceOf(CampaignProviderValidationError);

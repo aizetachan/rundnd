@@ -20,15 +20,16 @@ describe("provider registry", () => {
       expect(ids).toEqual(["anthropic", "google", "openai", "openrouter"]);
     });
 
-    it("only Anthropic is available at M1.5", () => {
-      const available = listAvailableProviders().map((p) => p.id);
-      expect(available).toEqual(["anthropic"]);
+    it("Anthropic + Google are available after M3.5 sub 1", () => {
+      const available = listAvailableProviders()
+        .map((p) => p.id)
+        .sort();
+      expect(available).toEqual(["anthropic", "google"]);
     });
 
     it("unavailable providers carry an actionable reason", () => {
       const google = getProvider("google");
-      expect(google.available).toBe(false);
-      expect(google.unavailableReason).toMatch(/M3\.5/);
+      expect(google.available).toBe(true);
       const openai = getProvider("openai");
       expect(openai.unavailableReason).toMatch(/M5\.5/);
       const openrouter = getProvider("openrouter");
@@ -142,8 +143,8 @@ describe("provider registry", () => {
       ).toThrow(CampaignProviderValidationError);
     });
 
-    it("rejects Google at M1.5 with the unavailable reason", () => {
-      try {
+    it("accepts Google after M3.5 sub 1", () => {
+      expect(() =>
         validateCampaignProviderConfig({
           provider: "google",
           tier_models: {
@@ -152,13 +153,8 @@ describe("provider registry", () => {
             thinking: "gemini-3.1-pro-preview",
             creative: "gemini-3.1-pro-preview",
           },
-        });
-        expect.fail("should have thrown");
-      } catch (err) {
-        expect(err).toBeInstanceOf(CampaignProviderValidationError);
-        expect((err as CampaignProviderValidationError).code).toBe("provider_unavailable");
-        expect((err as Error).message).toMatch(/M3\.5/);
-      }
+        }),
+      ).not.toThrow();
     });
 
     it("rejects model not in Anthropic's selectable roster", () => {

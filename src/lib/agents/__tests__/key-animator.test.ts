@@ -56,20 +56,6 @@ function baseInput(modelContext: CampaignProviderConfig): KeyAnimatorInput {
 }
 
 describe("runKeyAnimator — provider guard (M1.5 Commit D)", () => {
-  it("throws when modelContext.provider is 'google' (Google-KA lands M3.5)", async () => {
-    const googleContext: CampaignProviderConfig = {
-      provider: "google",
-      tier_models: {
-        probe: "claude-haiku-4-5-20251001",
-        fast: "gemini-3.1-flash-lite-preview",
-        thinking: "gemini-3.1-pro-preview",
-        creative: "gemini-3.1-pro-preview",
-      },
-    };
-    const iter = runKeyAnimator(baseInput(googleContext));
-    await expect(iter.next()).rejects.toThrow(/google/i);
-  });
-
   it("throws when modelContext.provider is 'openai' (OpenAI-KA lands M5.5)", async () => {
     const openaiContext: CampaignProviderConfig = {
       provider: "openai",

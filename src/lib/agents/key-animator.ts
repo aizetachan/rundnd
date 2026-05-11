@@ -12,6 +12,7 @@ import {
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type query,
 } from "@anthropic-ai/claude-agent-sdk";
+import { runKeyAnimatorGoogle } from "./ka/google";
 import type { AgentDeps } from "./types";
 import { defaultLogger } from "./types";
 
@@ -211,15 +212,23 @@ export async function* runKeyAnimator(
   // still wins — tests stay deterministic.
   const queryFn = deps.queryFn ?? getQueryFn();
 
-  // KA runs on Claude Agent SDK which is Anthropic-only. Campaigns
-  // configured for other providers need their provider's native KA
-  // (src/lib/agents/ka/google.ts, ka/openai.ts, ka/openrouter.ts)
-  // which land at M3.5 / M5.5. Fail loud here so misconfigured
-  // campaigns surface an actionable error, not silent wrong-provider
-  // dispatch.
+  // Provider dispatch. Anthropic runs through this function (Claude
+  // Agent SDK substrate). Google routes to `runKeyAnimatorGoogle` for
+  // a Gemini-native streaming loop (M3.5 sub 1 — narration-only;
+  // tools + consultants land in sub 2). OpenAI / OpenRouter still
+  // throw — they get their own backends at M5.5.
+  if (input.modelContext.provider === "google") {
+    yield* runKeyAnimatorGoogle(input, {
+      logger: deps.logger,
+      logContext: deps.logContext,
+      trace: deps.trace,
+      recordPrompt: deps.recordPrompt,
+    });
+    return;
+  }
   if (input.modelContext.provider !== "anthropic") {
     throw new Error(
-      `KeyAnimator on Claude Agent SDK only supports provider="anthropic" (got "${input.modelContext.provider}"). Google-KA lands M3.5; OpenAI / OpenRouter at M5.5.`,
+      `KeyAnimator on Claude Agent SDK only supports provider="anthropic" (got "${input.modelContext.provider}"). OpenAI / OpenRouter at M5.5.`,
     );
   }
   const creativeModel = input.modelContext.tier_models.creative;

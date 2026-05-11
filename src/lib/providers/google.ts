@@ -1,22 +1,13 @@
 import { PROBE_DEFAULT, type ProviderDefinition } from "./types";
 
 /**
- * Google provider — stub until Google-KA lands at M3.5.
+ * Google provider — Google-KA shipped at M3.5 sub 1 (narration-only
+ * Gemini-native KA loop). Tools + consultants on Gemini are sub 2.
  *
  * The roster is the user-confirmed 2026-04-19 list of valid Gemini IDs:
  *   - gemini-3.1-flash-lite-preview (cheapest flash; fast-tier fit)
  *   - gemini-3-flash-preview (standard flash; mid)
  *   - gemini-3.1-pro-preview (pro tier; thinking/creative fit)
- *
- * `available: false` — selecting Google as a campaign provider at M1.5
- * surfaces an actionable error. The registry slot exists so the
- * settings UI can render "Google (coming M3.5)" as a disabled option,
- * and downstream code (schema validation, dispatch) can reference the
- * provider safely without a special case.
- *
- * When M3.5 lands, this file populates per-tier rosters, flips
- * `available: true`, and the Google-KA plugs into dispatch.ts. No
- * other code should change.
  */
 
 export const GOOGLE_ROSTER: readonly string[] = [
@@ -28,8 +19,7 @@ export const GOOGLE_ROSTER: readonly string[] = [
 export const google: ProviderDefinition = {
   id: "google",
   displayName: "Google",
-  available: false,
-  unavailableReason: "Google-KA (Gemini-native) lands at M3.5. Currently available: Anthropic.",
+  available: true,
   tiers: {
     probe: {
       // Probe stays Haiku universally until revisited per-provider.

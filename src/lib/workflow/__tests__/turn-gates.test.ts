@@ -119,15 +119,15 @@ describe("resolveModelContext", () => {
 
   it("throws when the config is syntactically valid but targets an unavailable provider", () => {
     const settings = {
-      provider: "google" as const,
+      provider: "openai" as const,
       tier_models: {
         probe: "claude-haiku-4-5-20251001",
-        fast: "gemini-3.1-flash-lite-preview",
-        thinking: "gemini-3.1-pro-preview",
-        creative: "gemini-3.1-pro-preview",
+        fast: "gpt-5.4",
+        thinking: "gpt-5.4",
+        creative: "gpt-5.4",
       },
     };
-    expect(() => resolveModelContext(settings)).toThrow(/M3\.5/);
+    expect(() => resolveModelContext(settings)).toThrow(/M5\.5/);
   });
 
   it("throws when the model string isn't in the provider's roster", () => {
