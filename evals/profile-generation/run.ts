@@ -24,11 +24,13 @@ import { runProfileResearcherB } from "@/lib/agents/profile-researcher-b";
 import type { AnimeResearchOutput, ResearchTelemetry } from "@/lib/research";
 import { Profile } from "@/lib/types/profile";
 import yaml from "js-yaml";
+import { judgeVisualStyle, judgeVoiceCards } from "./judge";
 import { type IpScore, scoreIp, summarizeScores } from "./score";
 
 interface Args {
   path: "a" | "b" | "both";
   ipFilter: string | null;
+  judge: boolean;
 }
 
 interface IpResult {
@@ -37,11 +39,13 @@ interface IpResult {
   output: AnimeResearchOutput;
   telemetry: ResearchTelemetry;
   score: IpScore;
+  judge_voice_cards?: number | null;
+  judge_visual_style?: number | null;
 }
 
 function parseArgs(): Args {
   const argv = process.argv.slice(2);
-  const args: Args = { path: "both", ipFilter: null };
+  const args: Args = { path: "both", ipFilter: null, judge: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--path") {
@@ -56,11 +60,14 @@ function parseArgs(): Args {
         args.ipFilter = next;
         i += 1;
       }
+    } else if (a === "--judge") {
+      args.judge = true;
     } else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: pnpm evals:profile-generation [--path a|b|both] [--ip <slug>]\n" +
-          "  --path  research path(s) to evaluate (default: both)\n" +
-          "  --ip    scope to one ground-truth fixture by slug\n",
+        "Usage: pnpm evals:profile-generation [--path a|b|both] [--ip <slug>] [--judge]\n" +
+          "  --path   research path(s) to evaluate (default: both)\n" +
+          "  --ip     scope to one ground-truth fixture by slug\n" +
+          "  --judge  also run Gemini-as-judge soft axes (voice + visual)\n",
       );
       process.exit(0);
     }
@@ -154,17 +161,38 @@ async function main(): Promise<void> {
         continue;
       }
       const score = scoreIp(slug, outcome.output, groundTruth);
+      let judgeVoice: number | null | undefined;
+      let judgeVisual: number | null | undefined;
+      if (args.judge) {
+        const [v, vs] = await Promise.all([
+          judgeVoiceCards(
+            outcome.output.ip_mechanics.voice_cards,
+            groundTruth.ip_mechanics.voice_cards,
+          ),
+          judgeVisualStyle(
+            outcome.output.ip_mechanics.visual_style,
+            groundTruth.ip_mechanics.visual_style,
+          ),
+        ]);
+        judgeVoice = v.score;
+        judgeVisual = vs.score;
+      }
       const result: IpResult = {
         ip_slug: slug,
         path,
         output: outcome.output,
         telemetry: outcome.telemetry,
         score,
+        judge_voice_cards: judgeVoice,
+        judge_visual_style: judgeVisual,
       };
       writeFileSync(join(runDir, path, `${slug}.json`), JSON.stringify(result, null, 2), "utf-8");
       results.push(result);
+      const judgeStr = args.judge
+        ? ` judge_voice=${judgeVoice ?? "·"} judge_visual=${judgeVisual ?? "·"}`
+        : "";
       console.log(
-        `    ✓ ${slug} [path ${path}] dna_delta=${score.dna_delta_sum} tropes_off=${score.trope_disagreements} stat_ok=${score.stat_mapping_correct} ${score.passes_mechanical ? "PASS" : "FAIL"}`,
+        `    ✓ ${slug} [path ${path}] dna_delta=${score.dna_delta_sum} tropes_off=${score.trope_disagreements} stat_ok=${score.stat_mapping_correct}${judgeStr} ${score.passes_mechanical ? "PASS" : "FAIL"}`,
       );
     }
   }
