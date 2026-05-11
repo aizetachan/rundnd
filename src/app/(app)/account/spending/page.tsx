@@ -2,6 +2,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { getBudgetSnapshot } from "@/lib/budget";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { ExportButton } from "./export-button";
 import { SpendingForm } from "./spending-form";
 
 export const dynamic = "force-dynamic";
@@ -63,6 +64,16 @@ export default async function SpendingPage() {
           : ""}
         . Rate limiting (turns-per-minute) is a separate system-level guard that always runs.
       </p>
+
+      <section className="mt-10 border-t pt-6">
+        <h2 className="mb-2 font-semibold text-lg tracking-tight">Your data</h2>
+        <p className="mb-4 text-muted-foreground text-sm">
+          Download a JSON copy of every campaign you own — turns, character sheets, memory layers,
+          Session Zero state. The file is yours; the system keeps its own copy until you delete the
+          account.
+        </p>
+        <ExportButton />
+      </section>
     </div>
   );
 }
