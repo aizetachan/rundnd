@@ -80,6 +80,17 @@ function streamingGoogle(chunks: MockChunk[]): () => Pick<GoogleGenAI, "models">
   return () =>
     ({
       models: {
+        // Sub 2 added a synchronous generateContent for the tool-call
+        // loop. Tests that don't exercise tool calls expect this to
+        // return "no functionCalls" so the loop breaks immediately.
+        async generateContent(_params: unknown) {
+          return {
+            text: "",
+            functionCalls: [],
+            usageMetadata: undefined,
+            candidates: undefined,
+          };
+        },
         async generateContentStream(_params: unknown) {
           async function* gen() {
             for (const c of chunks) {
@@ -152,6 +163,9 @@ describe("runKeyAnimatorGoogle", () => {
     const google: () => Pick<GoogleGenAI, "models"> = () =>
       ({
         models: {
+          async generateContent() {
+            return { text: "", functionCalls: [] };
+          },
           async generateContentStream() {
             throw new Error("upstream rate limit");
           },
@@ -162,5 +176,58 @@ describe("runKeyAnimatorGoogle", () => {
       { google },
     );
     await expect(iter.next()).rejects.toThrow(/upstream rate limit/);
+  });
+
+  it("executes function calls then streams the finalizer (M3.5 sub 2)", async () => {
+    const { runKeyAnimatorGoogle } = await import("../google");
+    let toolRoundsSeen = 0;
+    const google: () => Pick<GoogleGenAI, "models"> = () =>
+      ({
+        models: {
+          async generateContent(_params: unknown) {
+            toolRoundsSeen += 1;
+            if (toolRoundsSeen === 1) {
+              // First round: emit a tool call to a known KA tool.
+              return {
+                text: "",
+                functionCalls: [{ name: "get_voice_patterns", args: {} }],
+                usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 30 },
+              };
+            }
+            // Second round: no more tool calls — let the streaming
+            // finalizer take over.
+            return { text: "", functionCalls: [] };
+          },
+          async generateContentStream(_params: unknown) {
+            async function* gen() {
+              yield {
+                text: "Spike walked in.",
+                usageMetadata: { promptTokenCount: 800, candidatesTokenCount: 4 },
+                candidates: [{ finishReason: "STOP" }],
+              };
+            }
+            return gen();
+          },
+        },
+      }) as unknown as Pick<GoogleGenAI, "models">;
+    const events: Awaited<ReturnType<typeof runKeyAnimatorGoogle>> extends AsyncGenerator<
+      infer E,
+      void,
+      void
+    >
+      ? E[]
+      : never = [];
+    for await (const ev of runKeyAnimatorGoogle(
+      baseInput("google") as Parameters<typeof runKeyAnimatorGoogle>[0],
+      { google },
+    )) {
+      events.push(ev);
+    }
+    expect(toolRoundsSeen).toBe(2);
+    const final = events.find((e) => e.kind === "final");
+    expect(final).toBeDefined();
+    if (final && final.kind === "final") {
+      expect(final.narrative).toBe("Spike walked in.");
+    }
   });
 });

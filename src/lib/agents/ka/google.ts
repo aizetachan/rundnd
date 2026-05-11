@@ -3,24 +3,24 @@ import { getGoogle } from "@/lib/llm";
 import { getPrompt } from "@/lib/prompts";
 import type { CampaignProviderConfig } from "@/lib/providers";
 import type { AidmToolContext } from "@/lib/tools";
-import type { GoogleGenAI } from "@google/genai";
+import type { Content, FunctionCall, GoogleGenAI } from "@google/genai";
 import type { AgentDeps } from "../types";
 import { defaultLogger } from "../types";
+import { buildGoogleKaFunctionDeclarations, executeFunctionCall } from "./google-tools";
 
 /**
  * Google-KA — Gemini 3.1 Pro KeyAnimator backend.
  *
- * Sub 1 scope (per `docs/plans/M3.5-google-ka.md`): narration-only.
- * Streams text deltas; renders the same blocks 1-4 system prompt;
- * yields the same `KeyAnimatorEvent` shape Anthropic-KA does. Does
- * NOT spawn consultants (OutcomeJudge, Validator, etc.) and does
- * NOT expose MCP tools — those land in sub 2 once we have telemetry
- * from real Gemini turns to decide which Function Declarations are
- * worth the orchestration cost.
+ * Sub 1 (narration-only) shipped 2026-05-11.
+ * Sub 2 wires the mid-turn tool surface: AIDM tool registry becomes
+ * Function Declarations Gemini can call. The loop runs synchronous
+ * non-streaming generateContent rounds while function calls fire,
+ * then one final streaming round for the player-facing narrative.
  *
- * For sub 1, a Google-campaign turn means: KA narrates from the
- * rendered context; post-turn workers (memory writer, Chronicler)
- * still fire on the narrative. The mid-turn tool surface is the gap.
+ * Consultants (OutcomeJudge, Validator, etc.) are still skipped at
+ * sub 2 — they need their own Gemini-side orchestration (each
+ * consultant becomes its own callable function that hits Sonnet 4.6
+ * internally). Documented gap; doesn't block player turns.
  */
 
 const ANTHROPIC_BOUNDARY = "<|SYSTEM_PROMPT_DYNAMIC_BOUNDARY|>";
@@ -145,19 +145,66 @@ export async function* runKeyAnimatorGoogle(
   let outputTokens = 0;
   let stopReason: string | null = null;
 
+  // Mid-turn tool loop. Each round either:
+  //   (a) returns function calls → execute + append responses → next round.
+  //   (b) returns text and no calls → break out of the loop, run a final
+  //       streaming round on the same `contents` so the player sees the
+  //       narrative stream in.
+  // Round cap of 8 protects against runaway loops; Anthropic's Agent SDK
+  // has its own internal cap.
+  const functionDeclarations = buildGoogleKaFunctionDeclarations();
+  const contents: Content[] = [{ role: "user", parts: [{ text: userMessage }] }];
+  const MAX_ROUNDS = 8;
+
   try {
-    // The SDK's streaming surface: generateContentStream returns an
-    // async iterator over response chunks. Each chunk has `.text` (the
-    // delta text) and optionally `.usageMetadata` on the final chunk.
+    let toolRoundsDone = false;
+    for (let round = 0; round < MAX_ROUNDS && !toolRoundsDone; round++) {
+      const response = await google.models.generateContent({
+        model: creativeModel,
+        contents,
+        config: {
+          systemInstruction,
+          tools: functionDeclarations.length ? [{ functionDeclarations }] : undefined,
+        },
+      });
+      const usage = response.usageMetadata;
+      if (usage) {
+        inputTokens = usage.promptTokenCount ?? inputTokens;
+        outputTokens = usage.candidatesTokenCount ?? outputTokens;
+      }
+      const calls: FunctionCall[] = response.functionCalls ?? [];
+      if (calls.length === 0) {
+        // No tool calls — break out and run the streaming finalizer.
+        toolRoundsDone = true;
+        break;
+      }
+      // Append the model's tool-call message + every executed response
+      // to `contents` so the next round sees the full state.
+      contents.push({
+        role: "model",
+        parts: calls.map((c) => ({ functionCall: c })),
+      });
+      const responseParts = await Promise.all(
+        calls.map(async (c) => {
+          const result = await executeFunctionCall(c.name ?? "", c.args, input.toolContext);
+          return {
+            functionResponse: {
+              name: c.name ?? "",
+              response: result,
+            },
+          };
+        }),
+      );
+      contents.push({ role: "user", parts: responseParts });
+    }
+
+    // Finalizer — stream the player-facing narrative now that any tool
+    // rounds have populated `contents` with retrieved context. Disable
+    // the tools surface so the model commits to text.
     const stream = await google.models.generateContentStream({
       model: creativeModel,
-      contents: [{ role: "user", parts: [{ text: userMessage }] }],
-      config: {
-        systemInstruction,
-        // Gemini 3 Pro supports native thinking; budget-tokens model
-        // is "auto" — Gemini decides based on prompt complexity. Sub 2
-        // can pin a budget if cost telemetry surfaces a need.
-      },
+      contents,
+      config: { systemInstruction },
     });
 
     for await (const chunk of stream) {
@@ -167,9 +214,6 @@ export async function* runKeyAnimatorGoogle(
         narrative += delta;
         yield { kind: "text", delta };
       }
-      // usageMetadata appears on the final chunk in Gemini's streaming
-      // shape. Capture token counts as they come; final estimate uses
-      // the last seen value.
       const usage = chunk.usageMetadata;
       if (usage) {
         inputTokens = usage.promptTokenCount ?? inputTokens;
