@@ -1,10 +1,10 @@
 import type { CampaignProviderConfig } from "@/lib/providers";
+import { Composition } from "@/lib/types/composition";
+import { DNAScales } from "@/lib/types/dna";
 import type { Profile } from "@/lib/types/profile";
 import { z } from "zod";
 import { runStructuredAgent } from "./_runner";
 import type { AgentDeps, AgentLogger } from "./types";
-import { Composition } from "@/lib/types/composition";
-import { DNAScales } from "@/lib/types/dna";
 
 /**
  * Active-IP synthesizer (M2 Wave B sub 8). When a campaign carries
@@ -137,7 +137,7 @@ export async function runActiveIPSynthesizer(
   deps: ActiveIPSynthesizerDeps = {},
 ): Promise<ActiveIPSynthesizerResult> {
   const userContent = [
-    `## Player intent`,
+    "## Player intent",
     input.intent || "(not pinned — derive from source titles + canonical tones)",
     "",
     ...input.sourceProfiles.map((p, i) => renderProfile(p, i)),
@@ -145,23 +145,26 @@ export async function runActiveIPSynthesizer(
     "Compose the synthesis JSON now. Schema enforced. JSON only.",
   ].join("\n");
 
-  const synthesis = await runStructuredAgent<ActiveIPSynthesis>({
-    agentName: "active-ip-synthesizer",
-    tier: "thinking",
-    systemPrompt: SYSTEM_PROMPT,
-    userContent,
-    outputSchema: SynthesisOutput,
-    fallback: FALLBACK,
-    maxTokens: 4000,
-    temperature: 0.5,
-    spanInput: {
-      profile_count: input.sourceProfiles.length,
-      intent_chars: input.intent.length,
+  const synthesis = await runStructuredAgent<ActiveIPSynthesis>(
+    {
+      agentName: "active-ip-synthesizer",
+      tier: "thinking",
+      systemPrompt: SYSTEM_PROMPT,
+      userContent,
+      outputSchema: SynthesisOutput,
+      fallback: FALLBACK,
+      maxTokens: 4000,
+      temperature: 0.5,
+      spanInput: {
+        profile_count: input.sourceProfiles.length,
+        intent_chars: input.intent.length,
+      },
     },
-  }, {
-    ...deps,
-    modelContext: input.modelContext,
-  });
+    {
+      ...deps,
+      modelContext: input.modelContext,
+    },
+  );
 
   // Detect the fallback sentinel — the FALLBACK constant has empty
   // blended_dna ({}) so a successful run returns something with the

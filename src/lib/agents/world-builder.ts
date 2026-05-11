@@ -15,9 +15,11 @@ import { type AgentRunnerDeps, runStructuredAgent } from "./_runner";
  * the player on reject/clarify paths.
  *
  * Routes through the shared runner so provider dispatch follows the
- * campaign's `modelContext` (M1.5). Anthropic-provider campaigns hit
- * Opus via `@anthropic-ai/sdk`; Google-provider campaigns (M3.5+) hit
- * Gemini Pro via `@google/genai`.
+ * campaign's `modelContext` (M1.5). WB runs on `tier: "thinking"` —
+ * Anthropic-provider campaigns hit `tier_models.thinking` (Sonnet 4.6
+ * by default since the 2026-04-23 cost-down; campaigns may pin Opus
+ * or a snapshot) via `@anthropic-ai/sdk`; Google-provider campaigns
+ * (M3.5+) hit Gemini Pro via `@google/genai`.
  *
  * Failure policy:
  *   - JSON/schema parse failure → runner retries once with stricter
@@ -63,14 +65,16 @@ export const WorldBuilderDecision = z.enum(["ACCEPT", "CLARIFY", "FLAG"]);
  * typed writes validate-in-depth at the tool boundary.
  */
 /**
- * Opus tolerates prompt instructions well but slips occasionally on
- * loose-JSON habits: a single-item list rendered as a bare string
- * ("to expand" instead of ["to expand"]), a null where the prompt
- * says "omit when unknown." Prod logs 2026-04-22 showed WB falling
- * back to CLARIFY purely from these. A couple of Zod preprocess
- * helpers coerce the loose shapes into the strict ones at parse
- * time — the prompt still asks for clean shapes, but we survive
- * the slips gracefully.
+ * Thinking-tier models tolerate prompt instructions well but slip
+ * occasionally on loose-JSON habits: a single-item list rendered as
+ * a bare string ("to expand" instead of ["to expand"]), a null where
+ * the prompt says "omit when unknown." Prod logs 2026-04-22 (Opus
+ * 4.7, before the Sonnet 4.6 cost-down) showed WB falling back to
+ * CLARIFY purely from these; Sonnet 4.6 exhibits the same slip
+ * pattern post-cutover, so the coercion is still load-bearing.
+ * A couple of Zod preprocess helpers coerce the loose shapes into
+ * the strict ones at parse time — the prompt still asks for clean
+ * shapes, but we survive the slips gracefully.
  */
 const coerceStringList = z.preprocess((v) => {
   if (typeof v === "string") return [v];
@@ -85,7 +89,8 @@ const coerceOptionalStringDropNull = z.preprocess((v) => {
 
 /**
  * `knowledge_topics` is a `Record<string, "expert" | "moderate" | "basic">`.
- * Opus sometimes emits it as an array instead (prod log 2026-04-22 turn 7):
+ * Thinking-tier models sometimes emit it as an array instead (prod log
+ * 2026-04-22 turn 7 on Opus 4.7; Sonnet 4.6 replicates):
  *
  *   Array of objects:  [{ topic: "ratcatching", level: "expert" }, ...]
  *   Array of objects:  [{ name: "X", expertise: "basic" }, ...]
@@ -306,7 +311,9 @@ export async function validateAssertion(
       outputSchema: WorldBuilderOutput,
       fallback: ACCEPT_FALLBACK,
       // Long worldbuilding assertions (multi-paragraph exposition)
-      // need headroom — 1024 was truncating some Opus outputs.
+      // need headroom — 1024 was truncating some thinking-tier outputs
+      // (observed on Opus 4.7 pre-cutover; Sonnet 4.6 has shorter
+      // verbose modes but headroom still warranted).
       maxTokens: 2048,
       spanInput: parsed,
     },

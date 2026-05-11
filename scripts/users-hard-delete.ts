@@ -31,11 +31,7 @@
 import { isAlgoliaConfigured } from "@/lib/algolia/client";
 import { getFirebaseFirestore } from "@/lib/firebase/admin";
 import { CAMPAIGN_SUB, COL, USER_SUB } from "@/lib/firestore";
-import type {
-  CollectionReference,
-  DocumentReference,
-  Query,
-} from "firebase-admin/firestore";
+import type { CollectionReference, DocumentReference, Query } from "firebase-admin/firestore";
 
 const DEFAULT_HOURS = 24;
 const ALL_CAMPAIGN_SUBCOLLECTIONS = Object.values(CAMPAIGN_SUB);

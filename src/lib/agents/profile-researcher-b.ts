@@ -249,11 +249,7 @@ export async function runProfileResearcherB(
   }
 
   // Detect the explicit failure sentinel the prompt allows.
-  if (
-    typeof parsed === "object" &&
-    parsed !== null &&
-    "_research_failed" in parsed
-  ) {
+  if (typeof parsed === "object" && parsed !== null && "_research_failed" in parsed) {
     logger("info", "profile-researcher-b: model declared research_failed", {
       query: input.query,
       reason: (parsed as { reason?: string }).reason,

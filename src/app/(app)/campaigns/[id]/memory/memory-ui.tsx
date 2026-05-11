@@ -44,7 +44,12 @@ export default function MemoryUI({ episodic, semantic, contextBlocks }: Props) {
     <div className="flex flex-col gap-4">
       <nav className="flex gap-1 border-b">
         {(["episodic", "semantic", "context"] as const).map((t) => {
-          const count = t === "episodic" ? episodic.length : t === "semantic" ? semantic.length : contextBlocks.length;
+          const count =
+            t === "episodic"
+              ? episodic.length
+              : t === "semantic"
+                ? semantic.length
+                : contextBlocks.length;
           const label = t === "context" ? "Context blocks" : t.charAt(0).toUpperCase() + t.slice(1);
           return (
             <button
@@ -78,10 +83,7 @@ function EpisodicTab({ entries }: { entries: EpisodicEntry[] }) {
   return (
     <ul className="flex flex-col gap-3">
       {entries.map((e) => (
-        <li
-          key={e.turn_number}
-          className="rounded-lg border bg-background/40 p-4"
-        >
+        <li key={e.turn_number} className="rounded-lg border bg-background/40 p-4">
           <div className="mb-2 flex items-baseline justify-between gap-2">
             <span className="font-mono text-muted-foreground text-xs">turn {e.turn_number}</span>
             {e.created_at ? (
@@ -108,7 +110,9 @@ function EpisodicTab({ entries }: { entries: EpisodicEntry[] }) {
 
 function SemanticTab({ entries }: { entries: SemanticEntry[] }) {
   if (entries.length === 0) {
-    return <EmptyState>No semantic memories written yet — Chronicler builds these post-turn.</EmptyState>;
+    return (
+      <EmptyState>No semantic memories written yet — Chronicler builds these post-turn.</EmptyState>
+    );
   }
   // Group by category for the eye to scan; categories already top-N'd by heat upstream.
   const byCategory = new Map<string, SemanticEntry[]>();
@@ -129,7 +133,9 @@ function SemanticTab({ entries }: { entries: SemanticEntry[] }) {
             {(byCategory.get(cat) ?? []).map((m) => (
               <li key={m.id} className="rounded-md border bg-background/40 p-3">
                 <div className="mb-1 flex items-baseline justify-between gap-2">
-                  <span className="font-mono text-muted-foreground text-xs">turn {m.turn_number}</span>
+                  <span className="font-mono text-muted-foreground text-xs">
+                    turn {m.turn_number}
+                  </span>
                   <span className="tabular-nums text-muted-foreground text-xs">heat {m.heat}</span>
                 </div>
                 <p className="text-sm leading-relaxed">{m.content}</p>

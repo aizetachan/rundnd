@@ -1,12 +1,7 @@
-import { z } from "zod";
-import {
-  IPMechanics,
-  MediaType,
-  MediaStatus,
-  RelationType,
-} from "@/lib/types/profile";
 import { Composition } from "@/lib/types/composition";
 import { DNAScales } from "@/lib/types/dna";
+import { IPMechanics, MediaStatus, MediaType, RelationType } from "@/lib/types/profile";
+import { z } from "zod";
 
 /**
  * Research output schema — what a profile-researcher subagent produces

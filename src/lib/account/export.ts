@@ -199,12 +199,10 @@ export async function buildExportBundle(
       sessionZero = {
         phase: typeof r.phase === "string" ? r.phase : "not_started",
         profile_refs: Array.isArray(r.profile_refs) ? (r.profile_refs as string[]) : [],
-        canonicality_mode:
-          typeof r.canonicality_mode === "string" ? r.canonicality_mode : null,
+        canonicality_mode: typeof r.canonicality_mode === "string" ? r.canonicality_mode : null,
         character_draft: r.character_draft ?? null,
         starting_location: typeof r.starting_location === "string" ? r.starting_location : null,
-        starting_situation:
-          typeof r.starting_situation === "string" ? r.starting_situation : null,
+        starting_situation: typeof r.starting_situation === "string" ? r.starting_situation : null,
         conversation_history: Array.isArray(r.conversation_history)
           ? (r.conversation_history as unknown[])
           : [],

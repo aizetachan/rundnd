@@ -139,7 +139,10 @@ export default async function MemoryPage({ params }: PageProps) {
           </h1>
         </div>
         <div className="text-right text-muted-foreground text-xs">
-          <div>{episodic.length} recent turns · {semantic.length} memories · {contextBlocks.length} blocks</div>
+          <div>
+            {episodic.length} recent turns · {semantic.length} memories · {contextBlocks.length}{" "}
+            blocks
+          </div>
           <div className="mt-0.5 italic">read-only view</div>
         </div>
       </header>

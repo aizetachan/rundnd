@@ -41,17 +41,9 @@ export async function softDeleteUser(
     .get();
 
   await firestore.runTransaction(async (tx) => {
-    tx.set(
-      userRef,
-      { deletedAt: FieldValue.serverTimestamp() },
-      { merge: true },
-    );
+    tx.set(userRef, { deletedAt: FieldValue.serverTimestamp() }, { merge: true });
     for (const campDoc of ownedSnap.docs) {
-      tx.set(
-        campDoc.ref,
-        { deletedAt: FieldValue.serverTimestamp() },
-        { merge: true },
-      );
+      tx.set(campDoc.ref, { deletedAt: FieldValue.serverTimestamp() }, { merge: true });
     }
   });
 

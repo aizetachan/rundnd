@@ -1,4 +1,4 @@
-import { type FranchiseCandidate } from "./types";
+import type { FranchiseCandidate } from "./types";
 
 /**
  * Minimal AniList GraphQL client. No SDK — just fetch + a tiny query
@@ -96,10 +96,7 @@ query ($search: String, $perPage: Int) {
  * + falls back to "spawn research without selectedAnilistId" letting
  * the LLM pick.
  */
-export async function searchFranchise(
-  title: string,
-  limit = 6,
-): Promise<FranchiseCandidate[]> {
+export async function searchFranchise(title: string, limit = 6): Promise<FranchiseCandidate[]> {
   const response = await fetch(ANILIST_ENDPOINT, {
     method: "POST",
     headers: {

@@ -15,9 +15,10 @@ import type { AnimeResearchOutput } from "./types";
  * Keeps every Researcher-emitted field intact — this is a hydration
  * pass, not a sanitizer.
  */
-export function normalizeAnimeResearchOutput(
-  output: AnimeResearchOutput,
-): { profile: Profile; slug: string } {
+export function normalizeAnimeResearchOutput(output: AnimeResearchOutput): {
+  profile: Profile;
+  slug: string;
+} {
   const slug = slugify(output.title);
 
   const id = output.anilist_id ? `al_${output.anilist_id}` : `manual_${slug}`;

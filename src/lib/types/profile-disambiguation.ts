@@ -1,5 +1,5 @@
-import { z } from "zod";
 import { FranchiseCandidate } from "@/lib/research/types";
+import { z } from "zod";
 
 /**
  * Conductor surface for franchise-graph disambiguation. When the

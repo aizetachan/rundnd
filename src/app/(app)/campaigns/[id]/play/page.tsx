@@ -40,12 +40,7 @@ export default async function PlayPage({ params }: PageProps) {
       .collection(CAMPAIGN_SUB.turns)
       .orderBy("turnNumber", "asc")
       .get(),
-    firestore
-      .collection(COL.campaigns)
-      .doc(id)
-      .collection(CAMPAIGN_SUB.characters)
-      .limit(1)
-      .get(),
+    firestore.collection(COL.campaigns).doc(id).collection(CAMPAIGN_SUB.characters).limit(1).get(),
   ]);
 
   const priorTurns = turnsSnap.docs.map((d) => {

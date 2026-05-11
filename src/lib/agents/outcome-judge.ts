@@ -9,8 +9,10 @@ import { type AgentRunnerDeps, runStructuredAgent } from "./_runner";
  *
  * KA invokes before narrating consequences. OJ produces mechanical
  * truth (success level, DC, narrative weight, consequence, cost,
- * rationale); KA narrates it. Opus 4.7 with extended thinking budget
- * 2K per ROADMAP §5.4.
+ * rationale); KA narrates it. Runs on the campaign's
+ * `tier_models.thinking` model (Sonnet 4.6 by default since the
+ * 2026-04-23 cost-down; campaigns may pin Opus or a snapshot) with
+ * extended thinking budget 2K per ROADMAP §5.4.
  *
  * The output schema is the shared `OutcomeOutput` from
  * `src/lib/types/turn.ts` so callers can hand it to persistence + KA's

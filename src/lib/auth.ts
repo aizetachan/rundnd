@@ -47,10 +47,7 @@ export async function getCurrentUser(): Promise<AppUser | null> {
   // upsert path is the one that calls verify + delete in sequence, so
   // a missing doc here means it's a genuine first visit).
   try {
-    const userSnap = await getFirebaseFirestore()
-      .collection(COL.users)
-      .doc(decoded.uid)
-      .get();
+    const userSnap = await getFirebaseFirestore().collection(COL.users).doc(decoded.uid).get();
     if (userSnap.exists && userSnap.data()?.deletedAt != null) {
       return null;
     }

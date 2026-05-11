@@ -203,7 +203,10 @@ export default function PlayUI({ campaignId, campaignName, priorTurns, character
           </aside>
         ) : null}
 
-        <div ref={feedRef} className="flex-1 overflow-y-auto rounded-lg border bg-background/40 p-4">
+        <div
+          ref={feedRef}
+          className="flex-1 overflow-y-auto rounded-lg border bg-background/40 p-4"
+        >
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
             {committed.length === 0 && !streaming && !displayedLive ? (
               <p className="text-muted-foreground italic">
