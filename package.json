@@ -32,7 +32,8 @@
     "algolia:configure": "tsx --env-file=.env.local scripts/configure-algolia-index.ts",
     "algolia:configure-profiles": "tsx --env-file=.env.local scripts/configure-algolia-profile-index.ts",
     "users:hard-delete": "tsx --env-file=.env.local scripts/users-hard-delete.ts",
-    "campaigns:archive": "tsx --env-file=.env.local scripts/campaigns-archive-cron.ts"
+    "campaigns:archive": "tsx --env-file=.env.local scripts/campaigns-archive-cron.ts",
+    "embed:backfill": "tsx --env-file=.env.local scripts/embed-backfill.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",

@@ -17,6 +17,10 @@ interface SemanticEntry {
   heat: number;
   flags: Record<string, unknown>;
   turn_number: number;
+  /** True when the memory row has a non-null embedding (M4). UI uses
+   *  this to surface which rows participate in vector recall vs only
+   *  category + heat ranking. */
+  embedded: boolean;
 }
 
 interface ContextBlockEntry {
@@ -136,7 +140,23 @@ function SemanticTab({ entries }: { entries: SemanticEntry[] }) {
                   <span className="font-mono text-muted-foreground text-xs">
                     turn {m.turn_number}
                   </span>
-                  <span className="tabular-nums text-muted-foreground text-xs">heat {m.heat}</span>
+                  <span className="flex items-center gap-2 text-xs">
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] tracking-wide ${
+                        m.embedded
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                      title={
+                        m.embedded
+                          ? "Embedded — participates in vector recall."
+                          : "Not embedded — falls back to category + heat ranking until embed-backfill runs."
+                      }
+                    >
+                      {m.embedded ? "embedded" : "no embed"}
+                    </span>
+                    <span className="tabular-nums text-muted-foreground">heat {m.heat}</span>
+                  </span>
                 </div>
                 <p className="text-sm leading-relaxed">{m.content}</p>
                 {Object.keys(m.flags).length > 0 ? (

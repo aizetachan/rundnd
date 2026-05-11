@@ -23,6 +23,9 @@ export interface EmbedResult {
   /** Token count consumed for the embed call. Approx — providers
    *  report this differently; null when unavailable. */
   tokens: number | null;
+  /** USD cost estimate for this single embed call, derived from the
+   *  canonical pricing table. Zero when token count is unknown. */
+  cost_usd: number;
 }
 
 export type EmbedFn = (text: string) => Promise<EmbedResult>;

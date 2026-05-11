@@ -23,7 +23,10 @@ describe("embedTextGemini", () => {
     expect(result.vector).toEqual([0.1, 0.2, 0.3]);
     expect(result.dimension).toBe(3);
     expect(result.model).toBe("text-embedding-004");
-    expect(result.tokens).toBeNull();
+    // tokens now char-length / 4 approximation; cost_usd derived from
+    // pricing table for text-embedding-004 ($0.0125 per 1M input).
+    expect(result.tokens).toBeGreaterThan(0);
+    expect(result.cost_usd).toBeGreaterThanOrEqual(0);
   });
 
   it("honors a model override", async () => {

@@ -1,4 +1,5 @@
 import { getGoogle } from "@/lib/llm";
+import { estimateCostUsd } from "@/lib/llm/pricing";
 import type { GoogleGenAI } from "@google/genai";
 import { type EmbedResult, GEMINI_TEXT_EMBEDDING_004_DIM } from "./types";
 
@@ -44,12 +45,21 @@ export async function embedTextGemini(
   if (!values || values.length === 0) {
     throw new Error(`embedTextGemini: model ${model} returned no embedding for the given text`);
   }
+  // Gemini's embed response doesn't surface a token count. Approximate
+  // input tokens from char-length (≈4 chars/token, conservative for
+  // English). The cost ledger uses this only as an upper-bound estimate;
+  // a future SDK version that returns token counts would supersede.
+  const approxTokens = Math.ceil(text.length / 4);
+  const cost = estimateCostUsd(model, {
+    input_tokens: approxTokens,
+    output_tokens: 0,
+  });
   return {
     vector: values,
     dimension: values.length,
     model,
-    // SDK doesn't surface token count on the embed response — leave null.
-    tokens: null,
+    tokens: approxTokens,
+    cost_usd: cost,
   };
 }
 

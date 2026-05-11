@@ -27,6 +27,7 @@ interface SemanticEntry {
   heat: number;
   flags: Record<string, unknown>;
   turn_number: number;
+  embedded: boolean;
 }
 
 interface ContextBlockEntry {
@@ -107,6 +108,7 @@ export default async function MemoryPage({ params }: PageProps) {
       heat: typeof r.heat === "number" ? r.heat : 0,
       flags: (r.flags ?? {}) as Record<string, unknown>,
       turn_number: typeof r.turnNumber === "number" ? r.turnNumber : 0,
+      embedded: r.embedding != null,
     };
   });
 

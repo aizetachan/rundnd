@@ -33,6 +33,16 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "lastUpdatedTurn", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "semanticMemories",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "embedding",
+          "vectorConfig": { "dimension": 768, "flat": {} }
+        }
+      ]
     }
   ],
   "fieldOverrides": []

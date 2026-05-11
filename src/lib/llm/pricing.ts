@@ -74,6 +74,15 @@ const GOOGLE_PRICING: Record<string, ModelPricing> = {
     cacheReadPer1M: 0.025,
     cacheCreationPer1M: 0,
   },
+  // Gemini text-embedding-004 (M4 embedder). Embedders bill input
+  // only; output is the vector (no per-token charge). outputPer1M
+  // and cache fields stay zero to keep the schema uniform.
+  "text-embedding-004": {
+    inputPer1M: 0.0125,
+    outputPer1M: 0,
+    cacheReadPer1M: 0,
+    cacheCreationPer1M: 0,
+  },
 };
 
 const OPENAI_PRICING: Record<string, ModelPricing> = {
