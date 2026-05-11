@@ -2,6 +2,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { getBudgetSnapshot } from "@/lib/budget";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { DeleteAccountButton } from "./delete-account-button";
 import { ExportButton } from "./export-button";
 import { SpendingForm } from "./spending-form";
 
@@ -73,6 +74,16 @@ export default async function SpendingPage() {
           account.
         </p>
         <ExportButton />
+      </section>
+
+      <section className="mt-10 border-t pt-6">
+        <h2 className="mb-2 font-semibold text-destructive text-lg tracking-tight">Danger zone</h2>
+        <p className="mb-4 text-muted-foreground text-sm">
+          Delete your account and every campaign you own. The data is marked as deleted immediately;
+          a cleanup pass purges it permanently within 24 hours. Sign-in with the same email after
+          deletion creates a fresh account; the prior data is unrecoverable past the 24-hour window.
+        </p>
+        <DeleteAccountButton />
       </section>
     </div>
   );
