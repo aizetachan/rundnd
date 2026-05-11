@@ -1,3 +1,4 @@
+import { embedText, isEmbedderConfigured } from "@/lib/embeddings";
 import { CAMPAIGN_SUB, COL } from "@/lib/firestore";
 import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
@@ -9,8 +10,12 @@ import { registerTool } from "../registry";
  * "Vicious knows Julia's hiding on Callisto". Heat 0–100; KA's
  * `search_memory` ranks by relevance * heat * decay-by-category.
  *
- * Embedding stays null at M1 — the embedder decision is M4 per §9.3.
- * Read path uses category + heat until embeddings populate.
+ * M4 sub 1: when `AIDM_EMBEDDING_PROVIDER` is configured (default
+ * `"gemini"`), populate the `embedding` field via the dispatcher in
+ * `src/lib/embeddings`. Embedder failure logs + falls back to
+ * `embedding: null` so writes never block on Gemini availability.
+ * Read path (M4 sub 2) consumes both — null rows degrade to
+ * category + heat ranking.
  */
 const InputSchema = z.object({
   category: z
@@ -49,6 +54,26 @@ export const writeSemanticMemoryTool = registerTool({
   outputSchema: OutputSchema,
   execute: async (input, ctx) => {
     if (!ctx.firestore) throw new Error("write_semantic_memory: ctx.firestore not provided");
+
+    // Best-effort embedding. If the env disables embedding or the
+    // embedder call fails, we persist with `embedding: null` so the
+    // write never blocks Chronicler.
+    let embedding: number[] | null = null;
+    if (isEmbedderConfigured()) {
+      try {
+        const result = await embedText(input.content);
+        embedding = result.vector;
+      } catch (err) {
+        // Log via console (no logger threaded through ctx here);
+        // future log infrastructure can pick this up if it matters.
+        console.warn("write_semantic_memory: embed failed, persisting with embedding=null", {
+          campaignId: ctx.campaignId,
+          category: input.category,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const ref = await ctx.firestore
       .collection(COL.campaigns)
       .doc(ctx.campaignId)
@@ -60,7 +85,7 @@ export const writeSemanticMemoryTool = registerTool({
         heat: input.heat,
         flags: input.flags ?? {},
         turnNumber: input.turn_number,
-        embedding: null,
+        embedding,
         createdAt: FieldValue.serverTimestamp(),
       });
     return { id: ref.id };

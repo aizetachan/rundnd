@@ -54,6 +54,16 @@ const envSchema = z.object({
   // is cost-forward + markup, users choose their own ceiling).
   AIDM_TURNS_PER_MINUTE_CAP: z.coerce.number().int().positive().default(6),
 
+  // --- Embeddings (M4 sub 1) ---
+  // Selects the backend for `src/lib/embeddings`. `"gemini"` (default)
+  // uses Gemini text-embedding-004 via @google/genai. `"none"` skips
+  // embedding entirely — callers persist `embedding: null` and the
+  // vector-search read path (M4 sub 2) degrades to category + heat
+  // ranking. The dispatcher pattern keeps Voyage / OpenAI as future
+  // additions without touching the call sites.
+  AIDM_EMBEDDING_PROVIDER: z.enum(["gemini", "none"]).default("gemini"),
+  AIDM_EMBEDDING_MODEL: z.string().default("text-embedding-004"),
+
   // --- Profile research path (M2 Wave B sub 6) ---
   // Selects which researcher the conductor's spawn_subagent("research")
   // call dispatches to:

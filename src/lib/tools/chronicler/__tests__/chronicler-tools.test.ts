@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AidmToolContext } from "../../index";
 
 /**
@@ -474,6 +474,55 @@ describe("Chronicler tools", () => {
           makeCtx(fs),
         ),
       ).rejects.toThrow();
+    });
+
+    it("persists embedding vector when the embedder succeeds (M4 sub 1)", async () => {
+      // vi.doMock affects subsequent dynamic imports — must be set
+      // BEFORE freshRegistry() pulls in the chronicler tool. We mock
+      // the embeddings module to return a deterministic vector so the
+      // write path's happy branch is testable without GOOGLE_API_KEY.
+      vi.doMock("@/lib/embeddings", () => ({
+        isEmbedderConfigured: () => true,
+        embedText: async () => ({
+          vector: [0.1, 0.2, 0.3],
+          dimension: 3,
+          model: "text-embedding-004-mock",
+          tokens: null,
+        }),
+      }));
+      const mod = await freshRegistry();
+      const captured = makeCaptured();
+      const fs = makeFakeFirestore(captured, {});
+      await mod.invokeTool(
+        "write_semantic_memory",
+        { category: "lore", content: "Vicious wears black.", turn_number: 3 },
+        makeCtx(fs),
+      );
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.data.embedding).toEqual([0.1, 0.2, 0.3]);
+      vi.doUnmock("@/lib/embeddings");
+    });
+
+    it("falls back to embedding=null when the embedder throws (M4 sub 1)", async () => {
+      vi.doMock("@/lib/embeddings", () => ({
+        isEmbedderConfigured: () => true,
+        embedText: async () => {
+          throw new Error("rate limited");
+        },
+      }));
+      const mod = await freshRegistry();
+      const captured = makeCaptured();
+      const fs = makeFakeFirestore(captured, {});
+      await mod.invokeTool(
+        "write_semantic_memory",
+        { category: "lore", content: "Faye chain-smokes.", turn_number: 4 },
+        makeCtx(fs),
+      );
+      const add = captured.adds[0];
+      if (!add) throw new Error("expected one add");
+      expect(add.data.embedding).toBeNull();
+      vi.doUnmock("@/lib/embeddings");
     });
   });
 
