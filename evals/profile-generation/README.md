@@ -21,7 +21,7 @@ present + absent, varied power_distribution shapes).
 
 Per ROADMAP §10.6:
 
-- DNA scale delta (sum of absolute differences across 11 numeric axes).
+- DNA scale delta (sum of absolute differences across the 24 numeric axes).
 - Trope flag agreement (15 boolean axes; count disagreements).
 - Power-distribution tier delta (peak_tier, typical_tier, floor_tier).
 - Stat-mapping correctness — binary: did the path detect on-screen stats
@@ -34,7 +34,7 @@ Per ROADMAP §10.6:
 ## Decision rule
 
 Ship Path B alone (delete scrapers) if:
-- DNA scale delta < 10 (summed across all axes).
+- DNA scale delta < 30 (summed across the 24 axes).
 - Trope disagreements < 3.
 - Stat mapping correct on every IP in the ground-truth set.
 - Judge scores within 0.3 of Path A.

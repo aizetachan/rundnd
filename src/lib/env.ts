@@ -53,6 +53,20 @@ const envSchema = z.object({
   // there is deliberately no AIDM_DAILY_COST_CAP_USD (business model
   // is cost-forward + markup, users choose their own ceiling).
   AIDM_TURNS_PER_MINUTE_CAP: z.coerce.number().int().positive().default(6),
+
+  // --- Profile research path (M2 Wave B sub 6) ---
+  // Selects which researcher the conductor's spawn_subagent("research")
+  // call dispatches to:
+  //   "b"    — Claude Opus 4.7 + extended thinking + native web_search.
+  //            Default. One external dependency (Anthropic).
+  //   "a"    — AniList GraphQL + Fandom wiki → Sonnet 4.6 parse pass.
+  //            Three external dependencies; lower cost.
+  //   "both" — run A and B in parallel, persist Path B's output (Path A
+  //            becomes telemetry-only). Used by the eval harness +
+  //            telemetry comparisons.
+  // The ROADMAP §10.6 decision rule eventually retires one path; this
+  // var stays load-bearing until then.
+  AIDM_PROFILE_RESEARCH_PATH: z.enum(["a", "b", "both"]).default("b"),
 });
 
 export type Env = z.infer<typeof envSchema>;

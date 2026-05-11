@@ -18,5 +18,6 @@
  */
 
 export * from "./anilist";
+export * from "./fandom";
 export * from "./normalize";
 export * from "./types";

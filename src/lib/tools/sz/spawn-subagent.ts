@@ -1,7 +1,10 @@
+import { runProfileResearcherA } from "@/lib/agents/profile-researcher-a";
 import { runProfileResearcherB } from "@/lib/agents/profile-researcher-b";
 import { indexProfile } from "@/lib/algolia/profile-index";
+import { env } from "@/lib/env";
 import { COL } from "@/lib/firestore";
 import { normalizeAnimeResearchOutput, searchFranchise } from "@/lib/research";
+import type { AnimeResearchOutput, ResearchTelemetry } from "@/lib/research";
 import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 import { registerTool } from "../registry";
@@ -73,10 +76,60 @@ export const spawnSubagentTool = registerTool({
     const start = Date.now();
 
     if (input.type === "research") {
-      const { output, telemetry } = await runProfileResearcherB({
-        query: input.query,
-        selectedAnilistId: input.selected_anilist_id,
-      });
+      // Path dispatch — see env.ts comment on AIDM_PROFILE_RESEARCH_PATH.
+      // "b" (default): single Path B call. "a": single Path A call.
+      // "both": run both in parallel; persist Path B's output (the
+      // higher-cost path is treated as authoritative until the eval
+      // harness decides otherwise), keep Path A's telemetry on the
+      // tool result for comparison. Lands in the conductor's
+      // tool_calls history; the eval harness reads it later.
+      const path = env.AIDM_PROFILE_RESEARCH_PATH;
+      let output: AnimeResearchOutput;
+      let telemetry: ResearchTelemetry;
+      let pathATelemetry: ResearchTelemetry | undefined;
+
+      if (path === "a") {
+        const a = await runProfileResearcherA({
+          query: input.query,
+          selectedAnilistId: input.selected_anilist_id,
+        });
+        output = a.output;
+        telemetry = a.telemetry;
+      } else if (path === "both") {
+        // allSettled (not all): a synchronous throw from either path
+        // (e.g. missing API key) shouldn't tank the other. We persist
+        // Path B's output as authoritative when both succeed; if Path B
+        // failed and Path A succeeded, we still surface failure to the
+        // conductor (better than persisting an unvalidated Path A
+        // result silently).
+        const [aSettled, bSettled] = await Promise.allSettled([
+          runProfileResearcherA({
+            query: input.query,
+            selectedAnilistId: input.selected_anilist_id,
+          }),
+          runProfileResearcherB({
+            query: input.query,
+            selectedAnilistId: input.selected_anilist_id,
+          }),
+        ]);
+        if (bSettled.status !== "fulfilled") {
+          throw bSettled.reason instanceof Error
+            ? bSettled.reason
+            : new Error(String(bSettled.reason));
+        }
+        output = bSettled.value.output;
+        telemetry = bSettled.value.telemetry;
+        if (aSettled.status === "fulfilled") {
+          pathATelemetry = aSettled.value.telemetry;
+        }
+      } else {
+        const b = await runProfileResearcherB({
+          query: input.query,
+          selectedAnilistId: input.selected_anilist_id,
+        });
+        output = b.output;
+        telemetry = b.telemetry;
+      }
 
       // Confidence floor: 0 means the researcher gave up (FALLBACK
       // sentinel). Don't persist that — let the conductor explain to
@@ -155,6 +208,11 @@ export const spawnSubagentTool = registerTool({
           cost_usd: telemetry.cost_usd,
           research_confidence: confidence,
         },
+        // Path A telemetry rides on the tool result for the eval
+        // harness when path=both. Not part of the Zod output schema —
+        // strict() isn't on, so the extra prop survives serialization
+        // into conversation_history.tool_calls.
+        ...(pathATelemetry ? { path_a_telemetry: pathATelemetry } : {}),
       };
       await appendConductorToolCall({
         firestore: ctx.firestore,

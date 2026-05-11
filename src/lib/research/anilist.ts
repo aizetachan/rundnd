@@ -158,6 +158,158 @@ export async function searchFranchise(title: string, limit = 6): Promise<Franchi
   return candidates;
 }
 
+/**
+ * Deep-metadata query for a single AniList media id — used by Path A.
+ *
+ * The franchise-graph SEARCH_QUERY above is narrow on purpose (it
+ * feeds the disambiguation UI which only needs title/year/popularity).
+ * Path A's LLM parse pass needs more: description, tags, characters,
+ * episode/chapter count, average score. Separate query so we don't
+ * pay for the heavy fields in every disambiguation call.
+ */
+const PROFILE_QUERY = `
+query ($id: Int) {
+  Media(id: $id) {
+    id
+    title { romaji english native }
+    synonyms
+    type
+    format
+    status
+    startDate { year }
+    episodes
+    chapters
+    popularity
+    averageScore
+    description(asHtml: false)
+    genres
+    tags { name rank isMediaSpoiler }
+    characters(sort: ROLE, perPage: 8) {
+      edges {
+        role
+        node { name { full } }
+      }
+    }
+    relations {
+      edges {
+        relationType
+        node { id title { romaji english } type format }
+      }
+    }
+  }
+}`;
+
+export interface AniListProfilePayload {
+  id: number;
+  title: string;
+  alternate_titles: string[];
+  media_type: "anime" | "manga" | "manhwa" | "donghua" | "light_novel";
+  status: "ongoing" | "completed" | "hiatus";
+  start_year: number | null;
+  episodes: number | null;
+  chapters: number | null;
+  popularity: number | null;
+  average_score: number | null;
+  description: string;
+  genres: string[];
+  tags: Array<{ name: string; rank: number; isMediaSpoiler: boolean }>;
+  /** Top characters by role — MAIN first, then SUPPORTING. */
+  characters: Array<{ name: string; role: string }>;
+  relations: Array<{ type: string; title: string }>;
+}
+
+/**
+ * Fetch full AniList metadata for a single media id. Used by the
+ * Path A profile researcher (`src/lib/agents/profile-researcher-a.ts`)
+ * to give the LLM parse pass enough structured material to populate
+ * `AnimeResearchOutput` without hallucinating outside the source.
+ *
+ * Throws on HTTP error so the caller (Path A orchestrator) can
+ * decide whether to retry, fall back to AniList-only, or surface the
+ * failure to the conductor.
+ */
+export async function fetchAniListProfile(anilist_id: number): Promise<AniListProfilePayload> {
+  const response = await fetch(ANILIST_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ query: PROFILE_QUERY, variables: { id: anilist_id } }),
+  });
+  if (!response.ok) {
+    throw new Error(`AniList HTTP ${response.status}: ${await response.text().catch(() => "")}`);
+  }
+  const json = (await response.json()) as {
+    data?: {
+      Media?: {
+        id: number;
+        title: { romaji: string; english: string | null; native: string | null };
+        synonyms: string[] | null;
+        type: string | null;
+        format: string | null;
+        status: string | null;
+        startDate: { year: number | null } | null;
+        episodes: number | null;
+        chapters: number | null;
+        popularity: number | null;
+        averageScore: number | null;
+        description: string | null;
+        genres: string[] | null;
+        tags: Array<{ name: string; rank: number | null; isMediaSpoiler: boolean }> | null;
+        characters: {
+          edges: Array<{ role: string; node: { name: { full: string } } }>;
+        } | null;
+        relations: {
+          edges: Array<{
+            relationType: string;
+            node: {
+              id: number;
+              title: { romaji: string; english: string | null };
+              type: string | null;
+              format: string | null;
+            };
+          }>;
+        } | null;
+      };
+    };
+  };
+  const m = json.data?.Media;
+  if (!m) {
+    throw new Error(`AniList returned no Media for id ${anilist_id}`);
+  }
+  const primaryTitle = m.title.english ?? m.title.romaji;
+  return {
+    id: m.id,
+    title: primaryTitle,
+    alternate_titles: [
+      m.title.romaji,
+      m.title.english,
+      m.title.native,
+      ...(m.synonyms ?? []),
+    ].filter((t): t is string => Boolean(t) && t !== primaryTitle),
+    media_type: mapMediaType(m.type, m.format),
+    status: mapStatus(m.status),
+    start_year: m.startDate?.year ?? null,
+    episodes: m.episodes ?? null,
+    chapters: m.chapters ?? null,
+    popularity: m.popularity ?? null,
+    average_score: m.averageScore ?? null,
+    description: (m.description ?? "").replace(/<[^>]+>/g, "").trim(),
+    genres: m.genres ?? [],
+    tags: (m.tags ?? []).map((t) => ({
+      name: t.name,
+      rank: t.rank ?? 0,
+      isMediaSpoiler: t.isMediaSpoiler,
+    })),
+    characters: (m.characters?.edges ?? []).map((e) => ({
+      name: e.node.name.full,
+      role: e.role,
+    })),
+    relations: (m.relations?.edges ?? []).map((e) => ({
+      type: e.relationType,
+      title: e.node.title.english ?? e.node.title.romaji,
+    })),
+  };
+}
+
 function buildBrief(m: AniListMedia): string {
   const year = m.startDate?.year ? ` (${m.startDate.year})` : "";
   const status = m.status === "RELEASING" ? "ongoing" : "completed";

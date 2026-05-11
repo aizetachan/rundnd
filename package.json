@@ -27,6 +27,7 @@
     "mockllm": "tsx scripts/mockllm.ts",
     "evals": "tsx evals/run.ts",
     "evals:ci": "tsx evals/run.ts --ci",
+    "evals:profile-generation": "tsx --env-file=.env.local evals/profile-generation/run.ts",
     "langfuse:latest": "tsx --env-file=.env.local scripts/langfuse-latest.ts",
     "algolia:configure": "tsx --env-file=.env.local scripts/configure-algolia-index.ts",
     "algolia:configure-profiles": "tsx --env-file=.env.local scripts/configure-algolia-profile-index.ts",
