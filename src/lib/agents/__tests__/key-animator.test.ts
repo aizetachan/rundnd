@@ -56,7 +56,7 @@ function baseInput(modelContext: CampaignProviderConfig): KeyAnimatorInput {
 }
 
 describe("runKeyAnimator — provider guard (M1.5 Commit D)", () => {
-  it("throws when modelContext.provider is 'openai' (OpenAI-KA lands M5.5)", async () => {
+  it("routes openai through OpenAI-KA without hitting the Anthropic-only error", async () => {
     const openaiContext: CampaignProviderConfig = {
       provider: "openai",
       tier_models: {
@@ -66,8 +66,12 @@ describe("runKeyAnimator — provider guard (M1.5 Commit D)", () => {
         creative: "gpt-5.4",
       },
     };
+    // OpenAI-KA needs OPENAI_API_KEY which isn't set in tests; the
+    // dispatcher reaches the OpenAI branch which then surfaces a
+    // config error from getOpenAI(), not the Anthropic-only guard
+    // error. That's the routing assertion.
     const iter = runKeyAnimator(baseInput(openaiContext));
-    await expect(iter.next()).rejects.toThrow(/openai/i);
+    await expect(iter.next()).rejects.toThrow(/OPENAI_API_KEY|not configured/i);
   });
 
   it("passes creative-tier model from modelContext into the Agent SDK query", async () => {

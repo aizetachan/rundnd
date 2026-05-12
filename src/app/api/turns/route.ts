@@ -7,7 +7,9 @@ import type { AidmSpanHandle } from "@/lib/tools";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
 import { chronicleTurn, computeArcTrigger } from "@/lib/workflow/chronicle";
 import { directTurn, shouldFireHybrid } from "@/lib/workflow/direct";
+import { foreshadowTick } from "@/lib/workflow/foreshadow";
 import { runMeta, shouldDispatchMeta } from "@/lib/workflow/meta";
+import { shouldSnapshot, writeStateSnapshot } from "@/lib/workflow/snapshot";
 import { runTurn } from "@/lib/workflow/turn";
 import { NextResponse, after } from "next/server";
 import { z } from "zod";
@@ -279,6 +281,28 @@ export async function POST(req: Request) {
               after(async () => {
                 await chronicleTurn(chronicleInput, { firestore, trace });
               });
+              // Foreshadowing lifecycle tick — ages seeds, marks
+              // overdue, surfaces convergence. Cheap (no LLM); runs
+              // every turn after Chronicler so seed retirements made
+              // this turn don't get auto-overdue-stamped.
+              after(async () => {
+                await foreshadowTick({
+                  campaignId: body.campaignId,
+                  userId: user.id,
+                  turnNumber: ev.turnNumber,
+                });
+              });
+              // State snapshot every 10 turns (M7). Idempotent; safe
+              // to fire optimistically.
+              if (shouldSnapshot(ev.turnNumber)) {
+                after(async () => {
+                  await writeStateSnapshot({
+                    campaignId: body.campaignId,
+                    userId: user.id,
+                    turnNumber: ev.turnNumber,
+                  });
+                });
+              }
               // Director hybrid trigger — every 3+ turns at epicness
               // ≥ 0.6 per ROADMAP §5.2. Fires post-Chronicler so the
               // director sees the latest summary.

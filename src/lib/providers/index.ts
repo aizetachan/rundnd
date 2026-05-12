@@ -7,6 +7,12 @@ export { GOOGLE_ROSTER, google } from "./google";
 export { openai } from "./openai";
 export { openrouter } from "./openrouter";
 export {
+  type Capability,
+  capabilityMatrix,
+  failoverCandidates,
+  supports,
+} from "./compat";
+export {
   anthropicFallbackConfig,
   CampaignProviderValidationError,
   defaultTierModelsFor,

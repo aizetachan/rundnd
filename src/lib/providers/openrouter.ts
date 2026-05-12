@@ -1,37 +1,30 @@
 import { PROBE_DEFAULT, type ProviderDefinition } from "./types";
 
 /**
- * OpenRouter provider — stub until M5.5.
+ * OpenRouter provider — M5.5 thin shim over OpenAI-KA shipped
+ * 2026-05-12.
  *
- * OpenRouter is the escape hatch: any model not in the Big 3's
- * bounded rosters (sunset Anthropic snapshots after Anthropic
- * deprecates them, DeepSeek / Qwen / Mistral, Groq / Cerebras cheap
- * inference, experimental releases) is reachable through OpenRouter's
- * OpenAI-compatible HTTP surface.
- *
- * `allowFreeFormModels: true` — unlike the Big 3, we don't hard-
- * enumerate OpenRouter's roster because it moves too fast. Users
- * type an exact OpenRouter model ID; we validate it's non-empty
- * and that's it. Bad IDs surface as runtime errors from OpenRouter,
- * not as validation blocks at save time.
- *
- * Lands at M5.5 as a thin shim over OpenAI-KA. See ROADMAP §7.7.
+ * OpenRouter is the escape hatch: any model not in the Big 3's bounded
+ * rosters is reachable through OpenRouter's OpenAI-compatible HTTP
+ * surface. `allowFreeFormModels: true` — users type an exact OpenRouter
+ * model ID; bad IDs surface as runtime errors from OpenRouter, not as
+ * validation blocks at save time.
  */
 
 export const openrouter: ProviderDefinition = {
   id: "openrouter",
   displayName: "OpenRouter",
-  available: false,
-  unavailableReason:
-    "OpenRouter (thin shim over OpenAI-KA) lands at M5.5. Currently available: Anthropic.",
+  available: true,
   tiers: {
     probe: {
       defaultModel: PROBE_DEFAULT,
       selectableModels: [PROBE_DEFAULT],
     },
-    fast: { defaultModel: "", selectableModels: [] },
-    thinking: { defaultModel: "", selectableModels: [] },
-    creative: { defaultModel: "", selectableModels: [] },
+    // Reasonable defaults so a new OpenRouter campaign has working
+    // tier_models out of the box. Users override per-tier.
+    fast: { defaultModel: "deepseek/deepseek-chat", selectableModels: [] },
+    thinking: { defaultModel: "anthropic/claude-sonnet-4.6", selectableModels: [] },
+    creative: { defaultModel: "anthropic/claude-opus-4.7", selectableModels: [] },
   },
   features: {
     nativeMCP: false,

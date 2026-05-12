@@ -89,23 +89,17 @@ describe("mergeSettingsWithProviderConfig", () => {
     }
   });
 
-  it("throws provider_unavailable when targeting a not-yet-built provider (OpenAI at M5.5)", () => {
+  it("accepts a valid openai config after M5.5", () => {
     const openaiConfig = {
       provider: "openai" as const,
       tier_models: {
         probe: "claude-haiku-4-5-20251001",
-        fast: "gpt-5.4",
+        fast: "gpt-5-mini",
         thinking: "gpt-5.4",
         creative: "gpt-5.4",
       },
     };
-    try {
-      mergeSettingsWithProviderConfig({}, openaiConfig);
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(CampaignProviderValidationError);
-      expect((err as CampaignProviderValidationError).code).toBe("provider_unavailable");
-    }
+    expect(() => mergeSettingsWithProviderConfig({}, openaiConfig)).not.toThrow();
   });
 
   it("throws model_not_in_roster when a tier picks a model the provider doesn't offer", () => {

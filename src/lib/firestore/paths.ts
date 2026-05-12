@@ -61,10 +61,15 @@ export const CAMPAIGN_SUB = {
   /**
    * Session Zero state. One doc per campaign at id "state". Optional
    * companion subcollection `openingStatePackages` holds the versioned
-   * HandoffCompiler outputs (created when SZ completes / is redone).
+   * HandoffCompiler outputs (created when SZ completes / is redone)
+   * AND state snapshots (M7 — packageType="snapshot").
    */
   sessionZero: "sessionZero",
   openingStatePackages: "openingStatePackages",
+  /** Quests (M5) — active objectives, completion, blocked/failed. */
+  quests: "quests",
+  /** Consequences (M5) — ripple effects of past actions. */
+  consequences: "consequences",
 } as const;
 
 /** Single-doc id under `campaigns/{id}/sessionZero/`. */

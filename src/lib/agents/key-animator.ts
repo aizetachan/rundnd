@@ -13,6 +13,8 @@ import {
   type query,
 } from "@anthropic-ai/claude-agent-sdk";
 import { runKeyAnimatorGoogle } from "./ka/google";
+import { runKeyAnimatorOpenAI } from "./ka/openai";
+import { runKeyAnimatorOpenRouter } from "./ka/openrouter";
 import type { AgentDeps } from "./types";
 import { defaultLogger } from "./types";
 
@@ -213,10 +215,8 @@ export async function* runKeyAnimator(
   const queryFn = deps.queryFn ?? getQueryFn();
 
   // Provider dispatch. Anthropic runs through this function (Claude
-  // Agent SDK substrate). Google routes to `runKeyAnimatorGoogle` for
-  // a Gemini-native streaming loop (M3.5 sub 1 — narration-only;
-  // tools + consultants land in sub 2). OpenAI / OpenRouter still
-  // throw — they get their own backends at M5.5.
+  // Agent SDK substrate). Google / OpenAI / OpenRouter route to their
+  // native KA backends.
   if (input.modelContext.provider === "google") {
     yield* runKeyAnimatorGoogle(input, {
       logger: deps.logger,
@@ -226,9 +226,27 @@ export async function* runKeyAnimator(
     });
     return;
   }
+  if (input.modelContext.provider === "openai") {
+    yield* runKeyAnimatorOpenAI(input, {
+      logger: deps.logger,
+      logContext: deps.logContext,
+      trace: deps.trace,
+      recordPrompt: deps.recordPrompt,
+    });
+    return;
+  }
+  if (input.modelContext.provider === "openrouter") {
+    yield* runKeyAnimatorOpenRouter(input, {
+      logger: deps.logger,
+      logContext: deps.logContext,
+      trace: deps.trace,
+      recordPrompt: deps.recordPrompt,
+    });
+    return;
+  }
   if (input.modelContext.provider !== "anthropic") {
     throw new Error(
-      `KeyAnimator on Claude Agent SDK only supports provider="anthropic" (got "${input.modelContext.provider}"). OpenAI / OpenRouter at M5.5.`,
+      `KeyAnimator on Claude Agent SDK only supports provider="anthropic" (got "${input.modelContext.provider}").`,
     );
   }
   const creativeModel = input.modelContext.tier_models.creative;

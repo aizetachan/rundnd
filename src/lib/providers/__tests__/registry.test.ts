@@ -20,20 +20,21 @@ describe("provider registry", () => {
       expect(ids).toEqual(["anthropic", "google", "openai", "openrouter"]);
     });
 
-    it("Anthropic + Google are available after M3.5 sub 1", () => {
+    it("all four providers available after M5.5", () => {
       const available = listAvailableProviders()
         .map((p) => p.id)
         .sort();
-      expect(available).toEqual(["anthropic", "google"]);
+      expect(available).toEqual(["anthropic", "google", "openai", "openrouter"]);
     });
 
-    it("unavailable providers carry an actionable reason", () => {
+    it("each provider exposes feature flags consumers can query", () => {
       const google = getProvider("google");
       expect(google.available).toBe(true);
       const openai = getProvider("openai");
-      expect(openai.unavailableReason).toMatch(/M5\.5/);
+      expect(openai.available).toBe(true);
       const openrouter = getProvider("openrouter");
-      expect(openrouter.unavailableReason).toMatch(/M5\.5/);
+      expect(openrouter.available).toBe(true);
+      expect(openrouter.allowFreeFormModels).toBe(true);
     });
   });
 
