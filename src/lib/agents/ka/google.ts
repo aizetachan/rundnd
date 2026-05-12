@@ -6,6 +6,11 @@ import type { AidmToolContext } from "@/lib/tools";
 import type { Content, FunctionCall, GoogleGenAI } from "@google/genai";
 import type { AgentDeps } from "../types";
 import { defaultLogger } from "../types";
+import {
+  buildGoogleKaConsultantDeclarations,
+  executeConsultantCall,
+  isConsultantCall,
+} from "./google-consultants";
 import { buildGoogleKaFunctionDeclarations, executeFunctionCall } from "./google-tools";
 
 /**
@@ -152,7 +157,16 @@ export async function* runKeyAnimatorGoogle(
   //       narrative stream in.
   // Round cap of 8 protects against runaway loops; Anthropic's Agent SDK
   // has its own internal cap.
-  const functionDeclarations = buildGoogleKaFunctionDeclarations();
+  // Combine MCP tool declarations with consultant adapter declarations
+  // (M3.5 sub 3). Both surfaces ride on the same Function Calling pipe;
+  // the dispatcher routes consultant names through their _runner-based
+  // executor (which dispatches back to Gemini for thinking-tier on a
+  // Google campaign, closing the loop) and tool names through the
+  // existing tool registry executor.
+  const functionDeclarations = [
+    ...buildGoogleKaFunctionDeclarations(),
+    ...buildGoogleKaConsultantDeclarations(),
+  ];
   const contents: Content[] = [{ role: "user", parts: [{ text: userMessage }] }];
   const MAX_ROUNDS = 8;
 
@@ -186,10 +200,13 @@ export async function* runKeyAnimatorGoogle(
       });
       const responseParts = await Promise.all(
         calls.map(async (c) => {
-          const result = await executeFunctionCall(c.name ?? "", c.args, input.toolContext);
+          const callName = c.name ?? "";
+          const result = isConsultantCall(callName)
+            ? await executeConsultantCall(callName, c.args, input.modelContext)
+            : await executeFunctionCall(callName, c.args, input.toolContext);
           return {
             functionResponse: {
-              name: c.name ?? "",
+              name: callName,
               response: result,
             },
           };

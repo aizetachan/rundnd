@@ -6,6 +6,7 @@ import { getLangfuse } from "@/lib/observability/langfuse";
 import type { AidmSpanHandle } from "@/lib/tools";
 import { CampaignSettings } from "@/lib/types/campaign-settings";
 import { chronicleTurn, computeArcTrigger } from "@/lib/workflow/chronicle";
+import { directTurn, shouldFireHybrid } from "@/lib/workflow/direct";
 import { runMeta, shouldDispatchMeta } from "@/lib/workflow/meta";
 import { runTurn } from "@/lib/workflow/turn";
 import { NextResponse, after } from "next/server";
@@ -278,6 +279,41 @@ export async function POST(req: Request) {
               after(async () => {
                 await chronicleTurn(chronicleInput, { firestore, trace });
               });
+              // Director hybrid trigger — every 3+ turns at epicness
+              // ≥ 0.6 per ROADMAP §5.2. Fires post-Chronicler so the
+              // director sees the latest summary.
+              if (shouldFireHybrid(ev.turnNumber, ev.intent.epicness ?? 0)) {
+                after(async () => {
+                  await directTurn(
+                    {
+                      campaignId: body.campaignId,
+                      userId: user.id,
+                      trigger: "hybrid",
+                      turnNumber: ev.turnNumber,
+                      epicness: ev.intent.epicness ?? 0,
+                    },
+                    { trace },
+                  );
+                });
+              }
+              // Director startup trigger — first gameplay turn ever
+              // (turn 1). Authors the initial arc plan + voice journal
+              // from the OpeningStatePackage. Session boundary detection
+              // for multi-session resumption lands at M7 once state
+              // snapshots exist.
+              if (ev.turnNumber === 1) {
+                after(async () => {
+                  await directTurn(
+                    {
+                      campaignId: body.campaignId,
+                      userId: user.id,
+                      trigger: "startup",
+                      turnNumber: ev.turnNumber,
+                    },
+                    { trace },
+                  );
+                });
+              }
             }
             break;
           }
